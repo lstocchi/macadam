@@ -5,6 +5,8 @@ import (
 	"log/slog"
 
 	"github.com/crc-org/macadam/pkg/cmdline"
+
+	_ "github.com/spf13/cobra"
 )
 
 func main() {
