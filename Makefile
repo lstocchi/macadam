@@ -15,7 +15,7 @@ include tools/tools.mk
 
 cross: bin/macadam-darwin-amd64 bin/macadam-darwin-arm64 bin/macadam-linux-amd64 bin/macadam-linux-arm64 bin/macadam-windows-amd64
 
-check: lint test
+check: lint vendorcheck test
 
 test:
 	@go test -v ./pkg/...
@@ -51,6 +51,15 @@ bin/macadam-windows-amd64: force-build
 .PHONY: lint
 lint: $(TOOLS_BINDIR)/golangci-lint
 	@"$(TOOLS_BINDIR)"/golangci-lint run
+
+.PHONY: vendor
+vendor:
+	go mod tidy
+	go mod vendor
+
+.PHONY: vendorcheck
+vendorcheck:
+	./build-scripts/verify-vendor.sh
 
 # the go compiler is doing a good job at not rebuilding unchanged files
 # this phony target ensures bin/macadam-* are always considered out of date
