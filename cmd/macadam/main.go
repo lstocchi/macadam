@@ -6,6 +6,7 @@ import (
 
 	"github.com/crc-org/macadam/pkg/cmdline"
 
+	_ "github.com/containers/podman/v5/pkg/machine"
 	_ "github.com/spf13/cobra"
 )
 
