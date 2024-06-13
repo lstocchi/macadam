@@ -1,4 +1,4 @@
-.PHONY: all build clean cross test
+.PHONY: all build check clean cross test
 
 DEFAULT_GOOS=$(shell go env GOOS)
 DEFAULT_GOARCH=$(shell go env GOARCH)
@@ -11,6 +11,8 @@ TOOLS_DIR := tools
 include tools/tools.mk
 
 cross: bin/macadam-darwin-amd64 bin/macadam-darwin-arm64 bin/macadam-linux-amd64 bin/macadam-linux-arm64 bin/macadam-windows-amd64
+
+check: lint test
 
 test:
 	@go test -v ./pkg/...
