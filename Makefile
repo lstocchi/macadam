@@ -1,5 +1,8 @@
 .PHONY: all build check clean cross test
 
+GIT_VERSION ?= $(shell git describe --always --dirty)
+VERSION_LDFLAGS=-X github.com/crc-org/macadam/pkg/cmdline.gitVersion=$(GIT_VERSION)
+
 DEFAULT_GOOS=$(shell go env GOOS)
 DEFAULT_GOARCH=$(shell go env GOARCH)
 
@@ -23,27 +26,27 @@ clean:
 bin/macadam-darwin-amd64: GOOS=darwin
 bin/macadam-darwin-amd64: GOARCH=amd64
 bin/macadam-darwin-amd64: force-build
-	@go build -o bin/macadam-$(GOOS)-$(GOARCH) ./cmd/macadam
+	@go build -ldflags "$(VERSION_LDFLAGS)" -o bin/macadam-$(GOOS)-$(GOARCH) ./cmd/macadam
 
 bin/macadam-darwin-arm64: GOOS=darwin
 bin/macadam-darwin-arm64: GOARCH=arm64
 bin/macadam-darwin-arm64: force-build
-	@go build -o bin/macadam-$(GOOS)-$(GOARCH) ./cmd/macadam
+	@go build -ldflags "$(VERSION_LDFLAGS)" -o bin/macadam-$(GOOS)-$(GOARCH) ./cmd/macadam
 
 bin/macadam-linux-amd64: GOOS=linux
 bin/macadam-linux-amd64: GOARCH=amd64
 bin/macadam-linux-amd64: force-build
-	@go build -o bin/macadam-$(GOOS)-$(GOARCH) ./cmd/macadam
+	@go build -ldflags "$(VERSION_LDFLAGS)" -o bin/macadam-$(GOOS)-$(GOARCH) ./cmd/macadam
 
 bin/macadam-linux-arm64: GOOS=linux
 bin/macadam-linux-arm64: GOARCH=arm64
 bin/macadam-linux-arm64: force-build
-	@go build -o bin/macadam-$(GOOS)-$(GOARCH) ./cmd/macadam
+	@go build -ldflags "$(VERSION_LDFLAGS)" -o bin/macadam-$(GOOS)-$(GOARCH) ./cmd/macadam
 
 bin/macadam-windows-amd64: GOOS=windows
 bin/macadam-windows-amd64: GOARCH=amd64
 bin/macadam-windows-amd64: force-build
-	@go build -o bin/macadam-$(GOOS)-$(GOARCH) ./cmd/macadam
+	@go build -ldflags "$(VERSION_LDFLAGS)" -o bin/macadam-$(GOOS)-$(GOARCH) ./cmd/macadam
 
 .PHONY: lint
 lint: $(TOOLS_BINDIR)/golangci-lint
