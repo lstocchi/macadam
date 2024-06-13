@@ -7,6 +7,9 @@ all: build
 
 build: bin/macadam-$(DEFAULT_GOOS)-$(DEFAULT_GOARCH)
 
+TOOLS_DIR := tools
+include tools/tools.mk
+
 cross: bin/macadam-darwin-amd64 bin/macadam-darwin-arm64 bin/macadam-linux-amd64 bin/macadam-linux-arm64 bin/macadam-windows-amd64
 
 test:
@@ -39,6 +42,10 @@ bin/macadam-windows-amd64: GOOS=windows
 bin/macadam-windows-amd64: GOARCH=amd64
 bin/macadam-windows-amd64: force-build
 	@go build -o bin/macadam-$(GOOS)-$(GOARCH) ./cmd/macadam
+
+.PHONY: lint
+lint: $(TOOLS_BINDIR)/golangci-lint
+	@"$(TOOLS_BINDIR)"/golangci-lint run
 
 # the go compiler is doing a good job at not rebuilding unchanged files
 # this phony target ensures bin/macadam-* are always considered out of date
