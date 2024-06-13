@@ -1,0 +1,6 @@
+run:
+  build-tags:
+    - containers_image_openpgp
+    - exclude_graphdriver_btrfs
+    - btrfs_noversion
+
