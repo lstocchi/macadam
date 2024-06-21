@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -18,7 +17,6 @@ import (
 	"github.com/containers/podman/v5/pkg/machine/lock"
 	"github.com/containers/podman/v5/pkg/machine/provider"
 	"github.com/containers/podman/v5/pkg/machine/proxyenv"
-	"github.com/containers/podman/v5/pkg/machine/shim/diskpull"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/containers/podman/v5/utils"
 	"github.com/hashicorp/go-multierror"
@@ -71,9 +69,8 @@ func List(vmstubbers []vmconfigs.VMProvider, _ machine.ListOptions) ([]*machine.
 
 func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 	var (
-		err            error
-		imageExtension string
-		imagePath      *machineDefine.VMFile
+		err       error
+		imagePath *machineDefine.VMFile
 	)
 
 	callbackFuncs := machine.CleanUp()
@@ -85,9 +82,16 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 		return err
 	}
 
-	sshIdentityPath, err := env.GetSSHIdentityPath(machineDefine.DefaultIdentityName)
-	if err != nil {
-		return err
+	/* check the path to env.GetSSHIdentityPath */
+	/* ----> Can we make it configurable in initopts? */
+	/* Can we dynamically update vmconfig.SSH ? */
+	/* odd that username is in initopts, but ssh identity path is not */
+	sshIdentityPath := opts.SSHIdentityPath
+	if sshIdentityPath == "" {
+		sshIdentityPath, err = env.GetSSHIdentityPath(machineDefine.DefaultIdentityName)
+		if err != nil {
+			return err
+		}
 	}
 	sshKey, err := machine.GetSSHKeys(sshIdentityPath)
 	if err != nil {
@@ -117,34 +121,23 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 		createOpts.UserModeNetworking = *umn
 	}
 
-	// Get Image
-	// TODO This needs rework bigtime; my preference is most of below of not living in here.
-	// ideally we could get a func back that pulls the image, and only do so IF everything works because
-	// image stuff is the slowest part of the operation
-
-	// This is a break from before.  New images are named vmname-ARCH.
-	// It turns out that Windows/HyperV will not accept a disk that
-	// is not suffixed as ".vhdx". Go figure
-	switch mp.VMType() {
-	case machineDefine.QemuVirt:
-		imageExtension = ".qcow2"
-	case machineDefine.AppleHvVirt, machineDefine.LibKrun:
-		imageExtension = ".raw"
-	case machineDefine.HyperVVirt:
-		imageExtension = ".vhdx"
-	case machineDefine.WSLVirt:
-		imageExtension = ""
-	default:
-		return fmt.Errorf("unknown VM type: %s", mp.VMType())
+	imagePuller := opts.ImagePuller
+	if imagePuller == nil {
+		imagePuller, err = vmconfigs.NewQuayPuller(mp.VMType(), mc)
+		if err != nil {
+			return err
+		}
+		imagePuller.SetSourceURI(opts.Image)
 	}
 
-	imagePath, err = dirs.DataDir.AppendToNewVMFile(fmt.Sprintf("%s-%s%s", opts.Name, runtime.GOARCH, imageExtension), nil)
+	imagePath, err = imagePuller.LocalPath()
 	if err != nil {
 		return err
 	}
 	mc.ImagePath = imagePath
+	logrus.Infof("local image path: %s", imagePath)
 
-	// TODO The following stanzas should be re-written in a differeent place.  It should have a custom
+	// TODO The following stanzas should be re-written in a different place.  It should have a custom
 	// parser for our image pulling.  It would be nice if init just got an error and mydisk back.
 	//
 	// Eventual valid input:
@@ -153,7 +146,7 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 	// "/path
 	// "docker://quay.io/something/someManifest
 
-	if err := diskpull.GetDisk(opts.Image, dirs, mc.ImagePath, mp.VMType(), mc.Name); err != nil {
+	if err := imagePuller.Download(); err != nil {
 		return err
 	}
 
@@ -243,6 +236,7 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 	}
 	callbackFuncs.Add(cleanup)
 
+	logrus.Warn("CreateVM")
 	err = mp.CreateVM(createOpts, mc, &ignBuilder)
 	if err != nil {
 		return err
@@ -504,16 +498,22 @@ func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDe
 		return errors.New(msg)
 	}
 
+	// this expects to be able to ssh as root to the VM - switch to regular user + sudo?
+	// -> move it to a "PostStartVM()" interface method?
 	if err := proxyenv.ApplyProxies(mc); err != nil {
 		return err
 	}
 
 	// mount the volumes to the VM
+	// only used on linux for QEMU, and could most likely use the same code as
+	// apple.GenerateSystemDFilesForVirtiofsMounts
+	// Then MountVolumesToVM can be removed
 	if err := mp.MountVolumesToVM(mc, opts.Quiet); err != nil {
 		return err
 	}
 
 	// update the podman/docker socket service if the host user has been modified at all (UID or Rootful)
+	// need to make this podman/docker socket optional
 	if mc.HostUser.Modified {
 		if machine.UpdatePodmanDockerSockService(mc) == nil {
 			// Reset modification state if there are no errors, otherwise ignore errors
@@ -532,6 +532,7 @@ func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDe
 
 	noInfo := opts.NoInfo
 
+	// need to make this podman/docker socket optional
 	machine.WaitAPIAndPrintInfo(
 		forwardingState,
 		mc.Name,

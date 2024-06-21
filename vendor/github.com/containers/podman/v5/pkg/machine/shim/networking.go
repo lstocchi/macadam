@@ -52,6 +52,7 @@ func startHostForwarder(mc *vmconfigs.MachineConfig, provider vmconfigs.VMProvid
 	}
 
 	cmd := gvproxy.NewGvproxyCommand()
+	logrus.Warnf("gvproxy: %+v", cmd)
 
 	// GvProxy PID file path is now derived
 	runDir := dirs.RuntimeDir
