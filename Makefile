@@ -10,7 +10,7 @@ build: bin/macadam-$(DEFAULT_GOOS)-$(DEFAULT_GOARCH)
 cross: bin/macadam-darwin-amd64 bin/macadam-darwin-arm64 bin/macadam-linux-amd64 bin/macadam-linux-arm64 bin/macadam-windows-amd64
 
 test:
-	@go test -v ./pkg/...
+	@go test -tags "$(BUILDTAGS)" -v ./pkg/...
 
 clean:
 	@rm -rf bin
