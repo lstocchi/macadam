@@ -7,6 +7,8 @@ toolchain go1.23.2
 require (
 	github.com/containers/common v0.61.1-0.20241125172552-a801fac4edc0
 	github.com/containers/podman/v5 v5.3.1
+	github.com/crc-org/crc/v2 v2.44.0
+	github.com/crc-org/machine v0.0.0-20240926103419-a943b47fd48b
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/pflag v1.0.5 // indirect
@@ -43,7 +45,6 @@ require (
 	github.com/containers/storage v1.56.0 // indirect
 	github.com/containers/winquit v1.1.0 // indirect
 	github.com/coreos/go-systemd/v22 v22.5.1-0.20231103132048-7d375ecc2b09 // indirect
-	github.com/crc-org/crc/v2 v2.44.0 // indirect
 	github.com/crc-org/vfkit v0.5.1 // indirect
 	github.com/cyberphone/json-canonicalization v0.0.0-20231217050601-ba74d44ecf5f // indirect
 	github.com/cyphar/filepath-securejoin v0.3.4 // indirect
