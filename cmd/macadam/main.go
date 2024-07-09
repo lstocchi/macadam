@@ -51,6 +51,8 @@ func startMachine(m *PodmanMachine) error {
 		NoInfo: false,
 		Quiet:  false,
 	}
+	slog.Info(fmt.Sprintf("SSH config: %v", m.config.SSH))
+
 	if err := shim.Start(m.config, m.provider, dirs, startOpts); err != nil {
 		return err
 	}
@@ -187,6 +189,7 @@ func main() {
 	machine, err := initMachine(initOpts)
 	if err != nil && !errors.Is(err, define.ErrVMAlreadyExists) {
 		slog.Error(err.Error())
+		os.Exit(1)
 	}
 	if err := startMachine(machine); err != nil {
 		slog.Error(err.Error())
