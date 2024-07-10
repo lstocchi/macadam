@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/crc-org/macadam/pkg/cmdline"
+	"github.com/cfergeau/macadam/pkg/cmdline"
 
 	"github.com/containers/common/pkg/config"
 	ldefine "github.com/containers/podman/v5/libpod/define"
