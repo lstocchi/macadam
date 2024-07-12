@@ -393,10 +393,31 @@ func (d *Driver) GetSharedDirs() ([]drivers.SharedDir, error) {
 	return d.SharedDirs, nil
 }
 
+func podmanStatusToCrcState(status define.Status) state.State {
+	switch status {
+	case define.Running:
+		return state.Running
+	case define.Stopped:
+		return state.Stopped
+	case define.Starting:
+		return state.Running
+	case define.Unknown:
+		return state.Error
+	}
+
+	// unknown state
+	return state.Error
+}
+
 // GetState returns the state that the host is in (running, stopped, etc)
 func (d *Driver) GetState() (state.State, error) {
+	status, err := d.vmProvider.State(d.vmConfig, false)
+	if err != nil {
+		return state.Error, err
+	}
+	return podmanStatusToCrcState(status), nil
 	// piggy back on podman machine state
-	return state.Error, fmt.Errorf("GetState() unimplemented")
+	//return state.Error, fmt.Errorf("GetState() unimplemented")
 }
 
 // Kill stops a host forcefully
