@@ -144,7 +144,23 @@ func (d *Driver) initOpts() *define.InitOptions {
 	return &initOpts
 }
 
-// Create a host using the driver's config
+func (d *Driver) Reload() error {
+	if d.vmProvider == nil {
+		provider, err := provider2.Get()
+		if err != nil {
+			return err
+		}
+		d.vmProvider = provider
+	}
+	vmConfig, _, err := shim.VMExists(d.MachineName, []vmconfigs.VMProvider{d.vmProvider})
+	if err != nil {
+		return err
+	}
+	d.vmConfig = vmConfig
+
+	return nil
+}
+
 func (d *Driver) Create() error {
 	if err := d.PreCreateCheck(); err != nil {
 		return err
