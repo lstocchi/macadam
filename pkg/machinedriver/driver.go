@@ -427,6 +427,9 @@ func podmanStatusToCrcState(status define.Status) state.State {
 
 // GetState returns the state that the host is in (running, stopped, etc)
 func (d *Driver) GetState() (state.State, error) {
+	if d.vmConfig == nil {
+		return state.Stopped, nil
+	}
 	status, err := d.vmProvider.State(d.vmConfig, false)
 	if err != nil {
 		return state.Error, err
