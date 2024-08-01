@@ -484,3 +484,11 @@ func (d *Driver) Stop() error {
 	// podman machine stop
 	return fmt.Errorf("Stop() unimplemented")
 }
+
+func (d *Driver) SSH() drivers.SSHConfig {
+	return drivers.SSHConfig{
+		IdentityPath:   d.vmConfig.SSH.IdentityPath,
+		Port:           d.vmConfig.SSH.Port,
+		RemoteUsername: d.vmConfig.SSH.RemoteUsername,
+	}
+}
