@@ -28,7 +28,6 @@ import (
 	provider2 "github.com/containers/podman/v5/pkg/machine/provider"
 	"github.com/containers/podman/v5/pkg/machine/shim"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
-	crcos "github.com/crc-org/crc/v2/pkg/os"
 	"github.com/crc-org/machine/libmachine/drivers"
 	"github.com/crc-org/machine/libmachine/state"
 )
@@ -166,16 +165,6 @@ func (d *Driver) Create() error {
 		return err
 	}
 
-	switch d.ImageFormat {
-	case "qcow2":
-		// FIXME: the libvirt machine driver uses qemu-img
-		if err := crcos.CopyFile(d.ImageSourcePath, d.getDiskPath()); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("%s is an unsupported disk image format", d.ImageFormat)
-	}
-
 	// Check if machine already exists
 	vmConfig, exists, err := shim.VMExists(d.MachineName, []vmconfigs.VMProvider{d.vmProvider})
 	if err != nil {
@@ -206,6 +195,13 @@ func (d *Driver) Create() error {
 	*/
 
 	initOpts := d.initOpts()
+	crcPuller, err := NewCrcImagePuller(d.vmProvider.VMType())
+	if err != nil {
+		return nil
+	}
+	crcPuller.SetSourceURI(d.ImageSourcePath)
+	initOpts.ImagePuller = crcPuller
+
 	for idx, vol := range initOpts.Volumes {
 		initOpts.Volumes[idx] = os.ExpandEnv(vol)
 	}
