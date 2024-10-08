@@ -131,6 +131,7 @@ func (d *Driver) initOpts() *define.InitOptions {
 		initOpts.Volumes = defaultConfig.Machine.Volumes.Get()
 	*/
 	initOpts.Username = "core"
+	initOpts.SSHIdentityPath = d.VMDriver.SSHIdentityPath
 	initOpts.Image = d.getDiskPath()
 	initOpts.Volumes = []string{}
 	initOpts.USBs = []string{}
