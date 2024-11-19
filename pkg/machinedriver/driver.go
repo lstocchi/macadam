@@ -443,7 +443,22 @@ func (d *Driver) Kill() error {
 
 // Remove a host
 func (d *Driver) Remove() error {
-	return fmt.Errorf("Remove() unimplemented")
+	machineName := d.vmConfig.Name
+	fmt.Printf("Removing machine %q\n", machineName)
+	dirs, err := env.GetMachineDirs(d.vmProvider.VMType())
+	if err != nil {
+		return err
+	}
+	if err := shim.Stop(d.vmConfig, d.vmProvider, dirs, true); err != nil {
+		return err
+	}
+
+	if err := shim.Remove(d.vmConfig, d.vmProvider, dirs, machine.RemoveOptions{}); err != nil {
+		return err
+	}
+	//newMachineEvent(events.Remove, events.Event{Name: vmName})
+	fmt.Printf("Machine %q removed successfully\n", machineName)
+	return nil
 	/*
 		s, err := d.GetState()
 		if err != nil || s == state.Error {
