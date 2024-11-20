@@ -438,7 +438,13 @@ func (d *Driver) GetState() (state.State, error) {
 
 // Kill stops a host forcefully
 func (d *Driver) Kill() error {
-	return fmt.Errorf("Kill() unimplemented")
+	fmt.Printf("Forcefully stopping machine %q\n", d.vmConfig.Name)
+	if err := d.stop(false); err != nil {
+		return err
+	}
+	//newMachineEvent(events.Stop, events.Event{Name: vmName})
+	fmt.Printf("Machine %q forcefully stopped\n", d.vmConfig.Name)
+	return nil
 }
 
 // Remove a host
