@@ -496,8 +496,26 @@ func (d *Driver) UpdateConfigRaw(rawConfig []byte) error {
 
 // Stop a host gracefully
 func (d *Driver) Stop() error {
-	// podman machine stop
-	return fmt.Errorf("Stop() unimplemented")
+	fmt.Printf("Stopping machine %q\n", d.vmConfig.Name)
+	if err := d.stop(false); err != nil {
+		return err
+	}
+	//newMachineEvent(events.Stop, events.Event{Name: vmName})
+	fmt.Printf("Machine %q stopped successfully\n", d.vmConfig.Name)
+	return nil
+}
+
+func (d *Driver) stop(hardStop bool) error {
+	dirs, err := env.GetMachineDirs(d.vmProvider.VMType())
+	if err != nil {
+		return err
+	}
+
+	if err := shim.Stop(d.vmConfig, d.vmProvider, dirs, hardStop); err != nil {
+		return err
+	}
+	//newMachineEvent(events.Remove, events.Event{Name: vmName})
+	return nil
 }
 
 func (d *Driver) SSH() drivers.SSHConfig {
