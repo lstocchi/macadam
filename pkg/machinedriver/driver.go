@@ -17,6 +17,7 @@ limitations under the License.
 package macadam
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -481,23 +482,35 @@ func (d *Driver) Remove() error {
 
 // UpdateConfigRaw allows to change the state (memory, ...) of an already created machine
 func (d *Driver) UpdateConfigRaw(rawConfig []byte) error {
-	return fmt.Errorf("UpdateConfigRaw() unimplemented")
-	/*
-		var newDriver Driver
-		err := json.Unmarshal(rawConfig, &newDriver)
-		if err != nil {
-			return err
-		}
+	var newDriver Driver
+	if err := json.Unmarshal(rawConfig, &newDriver); err != nil {
+		return err
+	}
+	// or copy the pointer to podman structs from `d`?
+	if err := newDriver.Reload(); err != nil {
+		return err
+	}
 
-		err = d.resize(int64(newDriver.DiskCapacity))
-		if err != nil {
-			log.Debugf("failed to resize disk image: %v", err)
-			return err
-		}
-		*d = newDriver
+	setOpts := define.SetOptions{}
+	if d.CPU != newDriver.CPU {
+		newCPUs := uint64(newDriver.CPU)
+		setOpts.CPUs = &newCPUs
+	}
+	if d.Memory != newDriver.Memory {
+		newMemory := strongunits.MiB(newDriver.Memory)
+		setOpts.Memory = &newMemory
+	}
+	if d.DiskCapacity != newDriver.DiskCapacity {
+		newDiskSizeGB := strongunits.GiB(newDriver.DiskCapacity)
+		setOpts.DiskSize = &newDiskSizeGB
+	}
 
-		return nil
-	*/
+	if err := shim.Set(newDriver.vmConfig, newDriver.vmProvider, setOpts); err != nil {
+		return err
+	}
+	*d = newDriver
+
+	return nil
 }
 
 // Stop a host gracefully
