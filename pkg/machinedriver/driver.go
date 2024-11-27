@@ -132,7 +132,10 @@ func (d *Driver) initOpts() *define.InitOptions {
 		initOpts.Volumes = defaultConfig.Machine.Volumes.Get()
 	*/
 	initOpts.Username = "core"
-	initOpts.SSHIdentityPath = d.VMDriver.SSHIdentityPath
+	initOpts.SSHIdentityPath = d.VMDriver.SSHConfig.IdentityPath
+	if d.VMDriver.SSHConfig.RemoteUsername != "" {
+		initOpts.Username = d.VMDriver.SSHConfig.RemoteUsername
+	}
 	initOpts.Image = d.getDiskPath()
 	initOpts.Volumes = []string{}
 	initOpts.USBs = []string{}
