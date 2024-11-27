@@ -547,3 +547,18 @@ func (d *Driver) SSH() drivers.SSHConfig {
 		RemoteUsername: d.vmConfig.SSH.RemoteUsername,
 	}
 }
+
+func (d *Driver) UpdateSSHConfig(sshConfig drivers.SSHConfig) error {
+	d.vmConfig.Lock()
+	defer d.vmConfig.Unlock()
+
+	if err := d.vmConfig.Refresh(); err != nil {
+		return fmt.Errorf("reload config: %w", err)
+	}
+
+	d.vmConfig.SSH.Port = sshConfig.Port
+	d.vmConfig.SSH.IdentityPath = sshConfig.IdentityPath
+	d.vmConfig.SSH.RemoteUsername = sshConfig.RemoteUsername
+
+	return d.vmConfig.Write()
+}
