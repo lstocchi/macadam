@@ -9,6 +9,9 @@ import (
 	macadam "github.com/cfergeau/macadam/pkg/machinedriver"
 	ldefine "github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/machine"
+	"github.com/containers/podman/v5/pkg/machine/provider"
+	"github.com/containers/podman/v5/pkg/machine/shim"
+	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/spf13/cobra"
 )
 
@@ -49,11 +52,19 @@ func start(_ *cobra.Command, args []string) error {
 			return fmt.Errorf("invalid name %q: %w", initOpts.Name, ldefine.RegexError)
 		}
 	}
-	driver, err := macadam.GetDriverByMachineName(machineName)
+	initOpts := macadam.DefaultInitOpts(machineName)
+	//initOpts.ImagePuller = ...
+	vmProvider, err := provider.Get()
+	if err != nil {
+		return nil
+	}
+	err = shim.Init(*initOpts, vmProvider)
 	if err != nil {
 		return err
 	}
-
-	// we cannot start the start command if it was not init immediately before
-	return driver.Start()
+	vmConfig, _, err := shim.VMExists(initOpts.Name, []vmconfigs.VMProvider{vmProvider})
+	if err != nil {
+		return err
+	}
+	return macadam.Start(vmConfig, vmProvider)
 }
