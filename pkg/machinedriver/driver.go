@@ -150,14 +150,14 @@ func (d *Driver) getDiskPath() string {
 	return d.ResolveStorePath(fmt.Sprintf("%s.img", d.MachineName))
 }
 
-func (d *Driver) initOpts() *define.InitOptions {
+func DefaultInitOpts(machineName string) *define.InitOptions {
 	initOpts := define.InitOptions{}
 	// defaults from cmd/podman/machine/init.go
-	initOpts.Name = d.MachineName
+	initOpts.Name = machineName
 
-	initOpts.CPUS = uint64(d.VMDriver.CPU)
-	initOpts.DiskSize = uint64(strongunits.ToGiB(strongunits.B(d.VMDriver.DiskCapacity)))
-	initOpts.Memory = uint64(d.VMDriver.Memory)
+	initOpts.CPUS = uint64(DefaultCPUs)
+	//initOpts.DiskSize = uint64(???)
+	initOpts.Memory = uint64(DefaultMemory)
 	initOpts.TimeZone = ""
 	initOpts.ReExec = false
 	/*
@@ -170,7 +170,7 @@ func (d *Driver) initOpts() *define.InitOptions {
 	/* if d.VMDriver.SSHConfig.RemoteUsername != "" {
 		initOpts.Username = d.VMDriver.SSHConfig.RemoteUsername
 	} */
-	initOpts.Image = d.getDiskPath()
+	initOpts.Image = "" // cli mode will most likely not copy images to a central place
 	initOpts.Volumes = []string{}
 	initOpts.USBs = []string{}
 	initOpts.IgnitionPath = ""
@@ -180,6 +180,16 @@ func (d *Driver) initOpts() *define.InitOptions {
 	// user-mode networking
 
 	return &initOpts
+}
+
+func (d *Driver) initOpts() *define.InitOptions {
+	initOpts := DefaultInitOpts(d.MachineName)
+	initOpts.CPUS = uint64(d.VMDriver.CPU)
+	initOpts.DiskSize = uint64(strongunits.ToGiB(strongunits.B(d.VMDriver.DiskCapacity)))
+	initOpts.Memory = uint64(d.VMDriver.Memory)
+	initOpts.Image = d.getDiskPath()
+
+	return initOpts
 }
 
 func (d *Driver) Reload() error {
@@ -277,10 +287,9 @@ func (d *Driver) Create() error {
 	return nil
 }
 
-// Start a host
-func (d *Driver) Start() error {
-	machineName := d.vmConfig.Name
-	dirs, err := env.GetMachineDirs(d.vmProvider.VMType())
+func Start(vmConfig *vmconfigs.MachineConfig, vmProvider vmconfigs.VMProvider) error {
+	machineName := vmConfig.Name
+	dirs, err := env.GetMachineDirs(vmProvider.VMType())
 	if err != nil {
 		return err
 	}
@@ -297,9 +306,9 @@ func (d *Driver) Start() error {
 		NoInfo: false,
 		Quiet:  false,
 	}
-	slog.Info(fmt.Sprintf("SSH config: %v", d.vmConfig.SSH))
+	slog.Info(fmt.Sprintf("SSH config: %v", vmConfig.SSH))
 
-	if err := shim.Start(d.vmConfig, d.vmProvider, dirs, startOpts); err != nil {
+	if err := shim.Start(vmConfig, vmProvider, dirs, startOpts); err != nil {
 		return err
 	}
 	fmt.Printf("Machine %q started successfully\n", machineName)
@@ -438,6 +447,11 @@ func (d *Driver) Start() error {
 
 		return nil
 	*/
+}
+
+// Start a host
+func (d *Driver) Start() error {
+	return Start(d.vmConfig, d.vmProvider)
 }
 
 func (d *Driver) GetSharedDirs() ([]drivers.SharedDir, error) {
