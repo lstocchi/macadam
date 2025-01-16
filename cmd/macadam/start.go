@@ -58,13 +58,16 @@ func start(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return nil
 	}
-	err = shim.Init(*initOpts, vmProvider)
-	if err != nil {
-		return err
-	}
 	vmConfig, _, err := shim.VMExists(initOpts.Name, []vmconfigs.VMProvider{vmProvider})
 	if err != nil {
 		return err
 	}
+	if vmConfig == nil {
+		err = shim.Init(*initOpts, vmProvider)
+		if err != nil {
+			return err
+		}
+	}
+
 	return macadam.Start(vmConfig, vmProvider)
 }
