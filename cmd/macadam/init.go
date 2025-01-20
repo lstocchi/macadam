@@ -28,7 +28,7 @@ var (
 
 	initOpts           = define.InitOptions{}
 	initOptionalFlags  = InitOptionalFlags{}
-	defaultMachineName = define.DefaultMachineName
+	defaultMachineName = "macadam"
 	now                bool
 )
 
