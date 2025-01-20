@@ -6,12 +6,13 @@ import (
 	"fmt"
 
 	"github.com/cfergeau/macadam/cmd/macadam/registry"
+	"github.com/cfergeau/macadam/pkg/imagepullers"
 	macadam "github.com/cfergeau/macadam/pkg/machinedriver"
 	"github.com/containers/common/pkg/completion"
 	ldefine "github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/env"
 	provider2 "github.com/containers/podman/v5/pkg/machine/provider"
+	"github.com/containers/podman/v5/pkg/machine/shim"
 	"github.com/spf13/cobra"
 )
 
@@ -53,7 +54,7 @@ func init() {
 	_ = initCmd.RegisterFlagCompletionFunc(ImageFlagName, completion.AutocompleteDefault)
 
 	MachineNameFlagName := "machine-name"
-	flags.StringVar(&initOpts.Name, MachineNameFlagName, define.DefaultMachineName, "Name for the machine")
+	flags.StringVar(&initOpts.Name, MachineNameFlagName, defaultMachineName, "Name for the machine")
 	_ = initCmd.RegisterFlagCompletionFunc(MachineNameFlagName, completion.AutocompleteDefault)
 
 	/* flags := initCmd.Flags()
@@ -154,9 +155,16 @@ func initMachine(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	dirs, err := env.GetMachineDirs(provider.VMType())
-	if err != nil {
-		return err
+	/*
+		dirs, err := env.GetMachineDirs(provider.VMType())
+		if err != nil {
+			return err
+		}
+	*/
+
+	diskImage := ""
+	if len(args) > 0 {
+		diskImage = args[0]
 	}
 
 	machineName := initOpts.Name
@@ -168,9 +176,17 @@ func initMachine(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid name %q: %w", machineName, ldefine.RegexError)
 	}
 
-	driver := macadam.NewDriver(machineName, dirs.ConfigDir.Path)
-
-	//driver.ImageSourcePath = "/Users/luca/.crc/cache/crc_microshift_vfkit_4.17.7_arm64/crc.img"
-
-	return driver.Create()
+	initOpts := macadam.DefaultInitOpts(machineName)
+	initOpts.ImagePuller = &imagepullers.NoopImagePuller{}
+	initOpts.ImagePuller.SetSourceURI(diskImage)
+	initOpts.Name = machineName
+	initOpts.Image = diskImage
+	initOpts.DiskSize = 50
+	/*
+		_, _, err = shim.VMExists(machineName, []vmconfigs.VMProvider{provider})
+		if err == nil {
+			return fmt.Errorf("machine %q already exists", machineName)
+		}
+	*/
+	return shim.Init(*initOpts, provider)
 }
