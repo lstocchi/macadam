@@ -45,6 +45,17 @@ func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{
 		Command: initCmd,
 	})
+
+	flags := initCmd.Flags()
+
+	ImageFlagName := "image"
+	flags.StringVar(&initOpts.Image, ImageFlagName, "", "Bootable image for machine")
+	_ = initCmd.RegisterFlagCompletionFunc(ImageFlagName, completion.AutocompleteDefault)
+
+	MachineNameFlagName := "machine-name"
+	flags.StringVar(&initOpts.Name, MachineNameFlagName, define.DefaultMachineName, "Name for the machine")
+	_ = initCmd.RegisterFlagCompletionFunc(MachineNameFlagName, completion.AutocompleteDefault)
+
 	/* flags := initCmd.Flags()
 	cfg := registry.PodmanConfig()
 
@@ -148,16 +159,13 @@ func initMachine(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	machineName := defaultMachineName
-	if len(args) > 0 {
-		if len(args[0]) > maxMachineNameSize {
-			return fmt.Errorf("machine name %q must be %d characters or less", args[0], maxMachineNameSize)
-		}
-		machineName = args[0]
+	machineName := initOpts.Name
+	if len(machineName) > maxMachineNameSize {
+		return fmt.Errorf("machine name %q must be %d characters or less", machineName, maxMachineNameSize)
+	}
 
-		if !ldefine.NameRegex.MatchString(machineName) {
-			return fmt.Errorf("invalid name %q: %w", machineName, ldefine.RegexError)
-		}
+	if !ldefine.NameRegex.MatchString(machineName) {
+		return fmt.Errorf("invalid name %q: %w", machineName, ldefine.RegexError)
 	}
 
 	driver := macadam.NewDriver(machineName, dirs.ConfigDir.Path)
