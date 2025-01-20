@@ -7,17 +7,18 @@ import (
 	"path/filepath"
 
 	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	crcos "github.com/crc-org/crc/v2/pkg/os"
 )
 
 type CrcImagePuller struct {
-	localPath     *define.VMFile
-	sourcePath    string
-	vmType        define.VMType
-	machineConfig *vmconfigs.MachineConfig
-	machineDirs   *define.MachineDirs
+	//localPath     *define.VMFile
+	sourcePath string
+	vmType     define.VMType
+	//machineConfig *vmconfigs.MachineConfig
+	//machineDirs   *define.MachineDirs
 }
+
+var _ define.ImagePuller = &CrcImagePuller{}
 
 func GetHomeDir() string {
 	homeDir, err := os.UserHomeDir()
