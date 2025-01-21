@@ -31,6 +31,8 @@ var (
 	initOptionalFlags  = InitOptionalFlags{}
 	defaultMachineName = "macadam"
 	now                bool
+	sshIdentityPath    string
+	username           string
 )
 
 // Flags which have a meaning when unspecified that differs from the flag default
@@ -56,6 +58,14 @@ func init() {
 	MachineNameFlagName := "machine-name"
 	flags.StringVar(&initOpts.Name, MachineNameFlagName, defaultMachineName, "Name for the machine")
 	_ = initCmd.RegisterFlagCompletionFunc(MachineNameFlagName, completion.AutocompleteDefault)
+
+	SSHIdentityPathFlagName := "ssh-identity-path"
+	flags.StringVar(&sshIdentityPath, SSHIdentityPathFlagName, "", "Path to the SSH private key to use to access the machine")
+	_ = initCmd.RegisterFlagCompletionFunc(SSHIdentityPathFlagName, completion.AutocompleteDefault)
+
+	UsernameFlagName := "username"
+	flags.StringVar(&username, UsernameFlagName, "", "Username used in image")
+	_ = initCmd.RegisterFlagCompletionFunc(UsernameFlagName, completion.AutocompleteDefault)
 
 	/* flags := initCmd.Flags()
 	cfg := registry.PodmanConfig()
@@ -182,6 +192,8 @@ func initMachine(cmd *cobra.Command, args []string) error {
 	initOpts.Name = machineName
 	initOpts.Image = diskImage
 	initOpts.DiskSize = 50
+	initOpts.SSHIdentityPath = sshIdentityPath
+	initOpts.Username = username
 	/*
 		_, _, err = shim.VMExists(machineName, []vmconfigs.VMProvider{provider})
 		if err == nil {
