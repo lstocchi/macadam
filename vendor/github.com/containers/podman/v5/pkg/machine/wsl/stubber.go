@@ -18,7 +18,6 @@ import (
 	"github.com/containers/podman/v5/pkg/machine/define"
 	"github.com/containers/podman/v5/pkg/machine/ignition"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
-	"github.com/sirupsen/logrus"
 )
 
 type WSLStubber struct {
@@ -211,6 +210,25 @@ func (w WSLStubber) StartVM(mc *vmconfigs.MachineConfig) (func() error, func() e
 	if err != nil {
 		err = fmt.Errorf("the WSL bootstrap script failed: %w", err)
 	}
+	/*
+		err := wslInvoke(dist, "sh", "-c", "nohup", "unshare", "--kill-child", "--fork", "--pid", "--mount", "--mount-proc", "--propagation", "shared", "sleep", "infinity", ">/dev/null", "2>&1", "&")
+		if err != nil {
+			err = fmt.Errorf("the WSL bootstrap script failed: %w", err)
+		} */
+	//err := wslInvoke(dist, "sh", "-c", "nohup tail -f /root/macadam-wsl > /dev/null 2>&1 &")
+	/* cmd := exec.Command(wutil.FindWSL(), "-u", "root", "-d", dist, "sh")
+	//cmd.Stdin = strings.NewReader(sysdpid + "\necho $SYSDPID\n")
+	cmd.Stdin = strings.NewReader("tail -f /root/macadam-wsl &")
+	_, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	stderr := &bytes.Buffer{}
+	cmd.Stderr = stderr
+	err = cmd.Start() */
+
+	/* cmd := exec.Command(wutil.FindWSL(), "-d", dist, "--exec", "dbus-launch", "true")
+	_, err := cmd.CombinedOutput() */
 
 	readyFunc := func() error {
 		return nil
@@ -260,14 +278,14 @@ func (w WSLStubber) StopVM(mc *vmconfigs.MachineConfig, hardStop bool) error {
 		return fmt.Errorf("executing wait command: %w", err)
 	}
 
-	exitCmd := exec.Command(wutil.FindWSL(), "-u", "root", "-d", dist, "/usr/local/bin/enterns", "systemctl", "exit", "0")
+	/* exitCmd := exec.Command(wutil.FindWSL(), "-u", "root", "-d", dist, "/usr/local/bin/enterns", "systemctl", "exit", "0")
 	if err = exitCmd.Run(); err != nil {
 		return fmt.Errorf("stopping systemd: %w", err)
 	}
 
 	if err = cmd.Wait(); err != nil {
 		logrus.Warnf("Failed to wait for systemd to exit: (%s)", strings.TrimSpace(out.String()))
-	}
+	} */
 
 	return terminateDist(dist)
 }

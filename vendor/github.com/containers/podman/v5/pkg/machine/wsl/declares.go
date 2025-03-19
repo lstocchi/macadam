@@ -28,11 +28,25 @@ const appendPort = `grep -q Port\ %d /etc/ssh/sshd_config || echo Port %d >> /et
 const changePort = `sed -E -i 's/^Port[[:space:]]+[0-9]+/Port %d/' /etc/ssh/sshd_config`
 
 const configServices = `ln -fs /usr/lib/systemd/system/sshd.service /etc/systemd/system/multi-user.target.wants/sshd.service
+rm -f /etc/systemd/system/getty.target.wants/console-getty.service
+rm -f /etc/systemd/system/getty.target.wants/getty@tty1.service
+rm -f /etc/systemd/system/multi-user.target.wants/systemd-resolved.service
+rm -f /etc/systemd/system/sysinit.target.wants/systemd-resolved.service
+rm -f /etc/systemd/system/dbus-org.freedesktop.resolve1.service
+ln -fs /dev/null /etc/systemd/system/console-getty.service
+ln -fs /dev/null /etc/systemd/system/systemd-oomd.socket
+mkdir -p /etc/systemd/system/systemd-sysusers.service.d/
+adduser -m [USER] -G wheel
+mkdir -p /home/[USER]/.config/systemd/[USER]/
+chown [USER]:[USER] /home/[USER]/.config
+`
+
+const configServicesOld = `ln -fs /usr/lib/systemd/system/sshd.service /etc/systemd/system/multi-user.target.wants/sshd.service
 ln -fs /usr/lib/systemd/system/podman.socket /etc/systemd/system/sockets.target.wants/podman.socket
 rm -f /etc/systemd/system/getty.target.wants/console-getty.service
 rm -f /etc/systemd/system/getty.target.wants/getty@tty1.service
 rm -f /etc/systemd/system/multi-user.target.wants/systemd-resolved.service
-rm -f /etc/systemd/system/sysinit.target.wants//systemd-resolved.service
+rm -f /etc/systemd/system/sysinit.target.wants/systemd-resolved.service
 rm -f /etc/systemd/system/dbus-org.freedesktop.resolve1.service
 ln -fs /dev/null /etc/systemd/system/console-getty.service
 ln -fs /dev/null /etc/systemd/system/systemd-oomd.socket
@@ -47,6 +61,11 @@ const sudoers = `%wheel        ALL=(ALL)       NOPASSWD: ALL
 `
 
 const bootstrap = `#!/bin/bash
+nohup bash -c 'while true; do sleep 60; done' >/dev/null 2>&1 &
+sleep 0.1
+`
+
+const bootstrapOld = `#!/bin/bash
 ps -ef | grep -v grep | grep -q systemd && exit 0
 nohup unshare --kill-child --fork --pid --mount --mount-proc --propagation shared /lib/systemd/systemd >/dev/null 2>&1 &
 sleep 0.1
@@ -59,7 +78,7 @@ or type exit. This also means to log out you need to exit twice.
 
 `
 
-const sysdpid = "SYSDPID=`ps -eo cmd,pid | grep -m 1 ^/lib/systemd/systemd | awk '{print $2}'`"
+const sysdpid = "SYSDPID=`ps -eo cmd,pid | grep -m 1 'systemd' | awk '{print $2}'`"
 
 const profile = sysdpid + `
 if [ ! -z "$SYSDPID" ] && [ "$SYSDPID" != "1" ]; then
@@ -93,6 +112,10 @@ const wslConf = `[user]
 default=[USER]
 `
 
+const wslSystemdConf = `[boot]
+systemd=true
+`
+
 const wslConfUserNet = `
 [network]
 generateResolvConf = false
@@ -108,6 +131,15 @@ LoadCredential=
 `
 
 const lingerService = `[Unit]
+Description=A systemd user unit demo
+After=network-online.target
+[Service]
+ExecStart=/usr/bin/sleep infinity
+[Install]
+WantedBy=default.target
+`
+
+const lingerServiceOld = `[Unit]
 Description=A systemd user unit demo
 After=network-online.target
 Wants=network-online.target podman.socket

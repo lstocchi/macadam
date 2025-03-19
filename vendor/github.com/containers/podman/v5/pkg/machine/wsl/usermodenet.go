@@ -353,8 +353,20 @@ func changeDistUserModeNetworking(dist string, user string, image string, enable
 		return err
 	}
 
+	if err := appendSystemdConfig(dist); err != nil {
+		return err
+	}
+
 	if enable {
 		return appendDisableAutoResolve(dist)
+	}
+
+	return nil
+}
+
+func appendSystemdConfig(dist string) error {
+	if err := wslPipe(wslSystemdConf, dist, "sh", "-c", "cat >> /etc/wsl.conf"); err != nil {
+		return fmt.Errorf("could not append systemd config to wsl.conf: %w", err)
 	}
 
 	return nil

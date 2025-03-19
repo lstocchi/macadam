@@ -152,7 +152,6 @@ func conductVMReadinessCheck(mc *vmconfigs.MachineConfig, maxBackoffs int, backo
 		//
 		// CoreOS users have reported the same observation but
 		// the underlying source of the issue remains unknown.
-
 		if sshError = machine.CommonSSHSilent(mc.SSH.RemoteUsername, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, []string{"true"}); sshError != nil {
 			logrus.Debugf("SSH readiness check for machine failed: %v", sshError)
 			continue
@@ -214,6 +213,7 @@ func reassignSSHPort(mc *vmconfigs.MachineConfig, provider vmconfigs.VMProvider)
 func isListening(port int) bool {
 	// Check if we can dial it
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", "127.0.0.1", port), 10*time.Millisecond)
+	logrus.Infof("err %w", err)
 	if err != nil {
 		return false
 	}
