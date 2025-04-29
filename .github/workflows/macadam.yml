@@ -84,6 +84,11 @@ jobs:
         with:
           name: macadam binaries
           path: ./bin
+      - name: Install qemu-img (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt update
+          sudo apt install -y qemu-utils qemu-system
       - name: Download gvproxy
         if: runner.os == 'Linux'
         run: |

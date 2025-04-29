@@ -35,7 +35,8 @@ func downloadOS(destDir, url string) (string, error) {
 		return "", err
 	}
 
-	return uncompressXZ(resp.Filename, destDir)
+	return resp.Filename, nil
+	//return uncompressXZ(resp.Filename, destDir)
 }
 
 func uncompressXZ(fileName string, targetDir string) (string, error) {
