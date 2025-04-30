@@ -123,23 +123,25 @@ func (q *QEMUStubber) StopVM(mc *vmconfigs.MachineConfig, _ bool) error {
 
 	// Make sure that the associated QEMU process gets killed in case it's
 	// still running (#16054).
-	qemuPid, err := qemuPid(mc.QEMUHypervisor.QEMUPidPath)
-	if err != nil {
-		if stopErr == nil {
-			return err
+	if mc.Capabilities.GetHasReadyUnit() {
+		qemuPid, err := qemuPid(mc.QEMUHypervisor.QEMUPidPath)
+		if err != nil {
+			if stopErr == nil {
+				return err
+			}
+			return fmt.Errorf("%w: %w", stopErr, err)
 		}
-		return fmt.Errorf("%w: %w", stopErr, err)
-	}
 
-	if qemuPid == -1 {
-		return stopErr
-	}
-
-	if err := sigKill(qemuPid); err != nil {
-		if stopErr == nil {
-			return err
+		if qemuPid == -1 {
+			return stopErr
 		}
-		return fmt.Errorf("%w: %w", stopErr, err)
+
+		if err := sigKill(qemuPid); err != nil {
+			if stopErr == nil {
+				return err
+			}
+			return fmt.Errorf("%w: %w", stopErr, err)
+		}
 	}
 
 	return stopErr

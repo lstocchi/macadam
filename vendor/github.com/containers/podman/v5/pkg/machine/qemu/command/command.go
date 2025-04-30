@@ -28,7 +28,7 @@ type QemuCmd []string
 // starting with the qemu binary, architecture specific options, and propagated
 // proxy and SSL settings
 func NewQemuBuilder(binary string, options []string) QemuCmd {
-	q := QemuCmd{binary}
+	q := QemuCmd{"sudo", binary}
 	return append(q, options...)
 }
 
@@ -102,6 +102,10 @@ func (q *QemuCmd) SetBootableImage(image string) {
 // SetDisplay specifies whether the machine will have a display
 func (q *QemuCmd) SetDisplay(display string) {
 	*q = append(*q, "-display", display)
+}
+
+func (q *QemuCmd) SetNoGraphic() {
+	*q = append(*q, "-nographic")
 }
 
 func (q *QemuCmd) Build() []string {

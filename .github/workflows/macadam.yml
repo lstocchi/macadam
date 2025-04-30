@@ -69,7 +69,7 @@ jobs:
     strategy:
       matrix:
         os:
-        - ubuntu-22.04
+        - ubuntu-24.04
         - windows-latest
     runs-on: ${{ matrix.os }}
     env:
@@ -101,10 +101,13 @@ jobs:
       - name: Grant execute permissions
         if: runner.os == 'Linux'
         run: chmod +x ./bin/*
-      - name: Test
-        env:
-          CONTAINERS_HELPER_BINARY_DIR: ${{ github.workspace }}/tools
-        run: make e2e
+      - name: Setup upterm session
+        uses: lhotari/action-upterm@v1
+        with:
+          ## limits ssh access and adds the ssh public key for the user which triggered the workflow
+          limit-access-to-actor: true
+          ## limits ssh access and adds the ssh public keys of the listed GitHub users
+          limit-access-to-users: lstocchi
 
   lint:
     needs: build

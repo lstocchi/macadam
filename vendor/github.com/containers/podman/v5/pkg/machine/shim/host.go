@@ -436,8 +436,8 @@ func stopLocked(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *mach
 }
 
 func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDefine.MachineDirs, opts machine.StartOptions) error {
-	defaultBackoff := 500 * time.Millisecond
-	maxBackoffs := 6
+	defaultBackoff := 1000 * time.Millisecond
+	maxBackoffs := 10
 
 	mc.Lock()
 	defer mc.Unlock()
