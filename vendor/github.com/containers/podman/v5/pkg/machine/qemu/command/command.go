@@ -28,7 +28,7 @@ type QemuCmd []string
 // starting with the qemu binary, architecture specific options, and propagated
 // proxy and SSL settings
 func NewQemuBuilder(binary string, options []string) QemuCmd {
-	q := QemuCmd{"sudo", binary}
+	q := QemuCmd{binary}
 	return append(q, options...)
 }
 
