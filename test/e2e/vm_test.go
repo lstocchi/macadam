@@ -45,8 +45,9 @@ var _ = Describe("Macadam", func() {
 		session := macadamTest.Macadam([]string{"list"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(gexec.Exit())
-		list := session.OutputToString()
-		Expect(list).Should(Equal(""))
+		err := json.Unmarshal(session.Out.Contents(), &machineResponses)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(len(machineResponses)).Should(Equal(0))
 
 		// download CentOS image
 		centosProvider := osprovider.NewCentosProvider()
@@ -62,14 +63,13 @@ var _ = Describe("Macadam", func() {
 		session = macadamTest.Macadam([]string{"list"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(gexec.Exit())
-		list = session.OutputToString()
-		err = json.Unmarshal([]byte(list), &machineResponses)
+		err = json.Unmarshal(session.Out.Contents(), &machineResponses)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(len(machineResponses)).Should(Equal(1))
 
 		// start the CentOS VM
-		session = macadamTest.Macadam([]string{"start"})
-		session.WaitWithTimeout(180)
+		session = macadamTest.Macadam([]string{"start", "--log-level", "debug"})
+		session.WaitWithTimeout(60)
 		Expect(session).Should(gexec.Exit())
 		Expect(session.OutputToString()).Should(ContainSubstring("started successfully"))
 
@@ -93,8 +93,9 @@ var _ = Describe("Macadam", func() {
 		session = macadamTest.Macadam([]string{"list"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(gexec.Exit())
-		list = session.OutputToString()
-		Expect(list).Should(Equal(""))
+		err = json.Unmarshal(session.Out.Contents(), &machineResponses)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(len(machineResponses)).Should(Equal(0))
 	})
 
 })

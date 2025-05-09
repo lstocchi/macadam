@@ -93,10 +93,12 @@ func (q *QEMUStubber) setQEMUCommandLine(mc *vmconfigs.MachineConfig) error {
 		if err != nil {
 			return err
 		}
-		q.Command.SetSerialPort(*readySocket, *mc.QEMUHypervisor.QEMUPidPath, mc.Name)
+		q.Command.SetSerialPort(*readySocket, mc.Name)
 	}
 
+	q.Command.SetPidFile(*mc.QEMUHypervisor.QEMUPidPath)
 	q.Command.SetUSBHostPassthrough(mc.Resources.USBs)
+	q.Command.SetNoGraphic()
 
 	return nil
 }
@@ -126,24 +128,59 @@ func (q *QEMUStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.MachineCo
 }
 
 func runStartVMCommand(cmd *exec.Cmd) error {
+	var stdoutBuf bytes.Buffer
+	var stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	logrus.Debugf("Attempting to start command: %v", cmd)
 	err := cmd.Start()
 	if err != nil {
-		// check if qemu was not found
-		// look up qemu again maybe the path was changed, https://github.com/containers/podman/issues/13394
+		logrus.Debugf("Error starting command (initial attempt): %v", err.Error())
+
 		cfg, err := config.Default()
 		if err != nil {
+			logrus.Debugf("Error getting default config: %v", err.Error())
 			return err
 		}
+		logrus.Debug("Successfully loaded default config.")
+		logrus.Debugf("Loaded Configuration: %+v", cfg) // Print the config
+
 		qemuBinaryPath, err := cfg.FindHelperBinary(QemuCommand, true)
 		if err != nil {
+			logrus.Debugf("Error finding QEMU binary: %v", err.Error())
 			return err
 		}
+		logrus.Debugf("Found QEMU binary path: %s", qemuBinaryPath)
+
+		logrus.Debugf("Attempting to start command again with path: %s", qemuBinaryPath)
 		cmd.Path = qemuBinaryPath
 		err = cmd.Start()
 		if err != nil {
 			return fmt.Errorf("unable to execute %q: %w", cmd, err)
 		}
+		logrus.Debug("Successfully started QEMU after re-lookup.")
+	} else {
+		logrus.Debugf("Started qemu pid %d", cmd.Process.Pid)
+
+		// Start a goroutine to wait for the process and capture output
+		go func() {
+			err := cmd.Wait()
+			if err != nil {
+				logrus.Errorf("QEMU process exited with error: %v", err)
+			} else {
+				logrus.Debug("QEMU process exited successfully.")
+			}
+			logrus.Debugf("QEMU stdout:\n%s", stdoutBuf.String())
+			logrus.Errorf("QEMU stderr:\n%s", stderrBuf.String()) // Log stderr even on success
+		}()
 	}
+
+	// The runStartVMCommand function itself should likely return nil here
+	// as it has successfully started the process. The error handling
+	// for QEMU's exit is now within the goroutine. You might need a
+	// way to communicate errors from the goroutine back to the main process
+	// if that's required for your application logic.
 	return nil
 }
 
@@ -192,6 +229,7 @@ func (q *QEMUStubber) StartVM(mc *vmconfigs.MachineConfig) (func() error, func()
 	}
 
 	cmdLine := q.Command
+	logrus.Debug(q.Command)
 
 	// Disable graphic window when not in debug mode
 	// Done in start, so we're not suck with the debug level we used on init

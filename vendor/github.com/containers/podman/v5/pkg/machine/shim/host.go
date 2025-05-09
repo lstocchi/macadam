@@ -24,6 +24,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+var ErrRemoveUserCancelled = errors.New("user cancelled the removal operation")
+
 // List is done at the host level to allow for a *possible* future where
 // more than one provider is used
 func List(vmstubbers []vmconfigs.VMProvider, _ machine.ListOptions) ([]*machine.ListResponse, error) {
@@ -434,8 +436,8 @@ func stopLocked(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *mach
 }
 
 func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDefine.MachineDirs, opts machine.StartOptions) error {
-	defaultBackoff := 500 * time.Millisecond
-	maxBackoffs := 6
+	defaultBackoff := 1000 * time.Millisecond
+	maxBackoffs := 10
 
 	mc.Lock()
 	defer mc.Unlock()
@@ -697,7 +699,7 @@ func Remove(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineD
 			return err
 		}
 		if strings.ToLower(answer)[0] != 'y' {
-			return nil
+			return ErrRemoveUserCancelled
 		}
 	}
 
