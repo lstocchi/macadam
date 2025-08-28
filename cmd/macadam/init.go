@@ -8,14 +8,16 @@ import (
 	"os"
 
 	"github.com/containers/common/pkg/completion"
+	"github.com/containers/common/pkg/strongunits"
 	ldefine "github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/machine/define"
-	provider2 "github.com/containers/podman/v5/pkg/machine/provider"
 	"github.com/containers/podman/v5/pkg/machine/shim"
 	"github.com/crc-org/macadam/cmd/macadam/registry"
 	"github.com/crc-org/macadam/pkg/imagepullers"
 	macadam "github.com/crc-org/macadam/pkg/machinedriver"
+	provider2 "github.com/crc-org/macadam/pkg/machinedriver/provider"
 	"github.com/crc-org/macadam/pkg/preflights"
+	"github.com/docker/go-units"
 	"github.com/spf13/cobra"
 )
 
@@ -75,6 +77,10 @@ func init() {
 	memoryFlagName := "memory"
 	flags.Uint64VarP(&initOptsFromFlags.Memory, memoryFlagName, "m", 4096, "Memory in MiB")
 	_ = initCmd.RegisterFlagCompletionFunc(memoryFlagName, completion.AutocompleteNone)
+
+	CloudInitPathFlagName := "cloud-init"
+	flags.StringArrayVarP(&initOptsFromFlags.CloudInitFiles, CloudInitPathFlagName, "", []string{}, "Path to user-data, meta-data and network-config cloud-init configuration files")
+	_ = initCmd.RegisterFlagCompletionFunc(CloudInitPathFlagName, completion.AutocompleteDefault)
 
 	/* flags := initCmd.Flags()
 	cfg := registry.PodmanConfig()
@@ -144,14 +150,14 @@ func init() {
 }
 
 func initMachine(cmd *cobra.Command, args []string) error {
-	if err := preflights.RunPreflights(); err != nil {
-		slog.Error(err.Error())
-		os.Exit(1)
-	}
-
-	provider, err := provider2.Get()
+	vmProvider, err := provider2.GetProviderOrDefault(provider)
 	if err != nil {
 		return err
+	}
+
+	if err := preflights.RunPreflights(vmProvider); err != nil {
+		slog.Error(err.Error())
+		os.Exit(1)
 	}
 
 	/*
@@ -175,7 +181,23 @@ func initMachine(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid name %q: %w", machineName, ldefine.RegexError)
 	}
 
-	puller := imagepullers.NewNoopImagePuller(machineName, provider.VMType())
+	// Check if the disk image exists and is not larger than the specified disk size
+	if diskImage == "" {
+		return fmt.Errorf("disk image is required")
+	}
+
+	fileInfo, err := os.Stat(diskImage)
+	if err != nil {
+		return fmt.Errorf("failed to stat disk image %q: %w", diskImage, err)
+	}
+
+	diskSizeInBytes := int64(strongunits.GiB(initOptsFromFlags.DiskSize).ToBytes())
+	if fileInfo.Size() > diskSizeInBytes {
+		return fmt.Errorf("disk image %s (size: %s) is larger than the expected maximum size of %s",
+			diskImage, units.HumanSize(float64(fileInfo.Size())), units.HumanSize(float64(diskSizeInBytes)))
+	}
+
+	puller := imagepullers.NewNoopImagePuller(machineName, vmProvider.VMType())
 
 	initOpts := macadam.DefaultInitOpts(machineName)
 	initOpts.ImagePuller = puller
@@ -188,6 +210,7 @@ func initMachine(cmd *cobra.Command, args []string) error {
 	initOpts.SSHIdentityPath = initOptsFromFlags.SSHIdentityPath
 	initOpts.Username = initOptsFromFlags.Username
 	initOpts.CloudInit = true // this should be calculated based on the image we want to start ??
+	initOpts.CloudInitFiles = initOptsFromFlags.CloudInitFiles
 	initOpts.Capabilities = &define.MachineCapabilities{
 		HasReadyUnit:   false,
 		ForwardSockets: false,
@@ -198,5 +221,5 @@ func initMachine(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("machine %q already exists", machineName)
 		}
 	*/
-	return shim.Init(*initOpts, provider)
+	return shim.Init(*initOpts, vmProvider)
 }

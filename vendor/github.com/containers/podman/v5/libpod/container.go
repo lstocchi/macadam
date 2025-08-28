@@ -280,6 +280,33 @@ type ContainerImageVolume struct {
 	SubPath string `json:"subPath,omitempty"`
 }
 
+// ContainerArtifactVolume is a volume based on a artifact. The artifact blobs will
+// be bind mounted directly as files and must always be read only.
+type ContainerArtifactVolume struct {
+	// Source is the name or digest of the artifact that should be mounted
+	Source string `json:"source"`
+	// Dest is the absolute path of the mount in the container.
+	// If path is a file in the container, then the artifact must consist of a single blob.
+	// Otherwise if it is a directory or does not exists all artifact blobs will be mounted
+	// into this path as files. As name the "org.opencontainers.image.title" will be used if
+	// available otherwise the digest is used as name.
+	Dest string `json:"dest"`
+	// Title can be used for multi blob artifacts to only mount the one specific blob that
+	// matches the "org.opencontainers.image.title" annotation.
+	// Optional. Conflicts with Digest.
+	Title string `json:"title"`
+	// Digest can be used to filter a single blob from a multi blob artifact by the given digest.
+	// When this option is set the file name in the container defaults to the digest even when
+	// the title annotation exist.
+	// Optional. Conflicts with Title.
+	Digest string `json:"digest"`
+	// Name is the name that should be used for the path inside the container. When a single blob
+	// is mounted the name is used as is. If multiple blobs are mounted then mount them as
+	// "<name>-x" where x is a 0 indexed integer based on the layer order.
+	// Optional.
+	Name string `json:"name,omitempty"`
+}
+
 // ContainerSecret is a secret that is mounted in a container
 type ContainerSecret struct {
 	// Secret is the secret
@@ -640,6 +667,14 @@ func (c *Container) LogPath() string {
 // LogTag returns the tag to the container's log file
 func (c *Container) LogTag() string {
 	return c.config.LogTag
+}
+
+// LogSizeMax returns the maximum size of the container's log file.
+func (c *Container) LogSizeMax() int64 {
+	if c.config.LogSize > 0 {
+		return c.config.LogSize
+	}
+	return c.runtime.config.Containers.LogSizeMax
 }
 
 // RestartPolicy returns the container's restart policy.
@@ -1242,6 +1277,11 @@ func (c *Container) RootGID() int {
 // IsInfra returns whether the container is an infra container
 func (c *Container) IsInfra() bool {
 	return c.config.IsInfra
+}
+
+// IsDefaultInfra returns whether the container is a default infra container generated directly by podman
+func (c *Container) IsDefaultInfra() bool {
+	return c.config.IsDefaultInfra
 }
 
 // IsInitCtr returns whether the container is an init container

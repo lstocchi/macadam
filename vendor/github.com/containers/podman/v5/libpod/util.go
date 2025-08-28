@@ -12,10 +12,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/containers/common/libnetwork/types"
 	"github.com/containers/common/pkg/config"
@@ -28,14 +27,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// FuncTimer helps measure the execution time of a function
-// For debug purposes, do not leave in code
-// used like defer FuncTimer("foo")
-func FuncTimer(funcName string) {
-	elapsed := time.Since(time.Now())
-	fmt.Printf("%s executed in %d ms\n", funcName, elapsed)
-}
-
 // MountExists returns true if dest exists in the list of mounts
 func MountExists(specMounts []spec.Mount, dest string) bool {
 	for _, m := range specMounts {
@@ -46,42 +37,29 @@ func MountExists(specMounts []spec.Mount, dest string) bool {
 	return false
 }
 
-type byDestination []spec.Mount
-
-func (m byDestination) Len() int {
-	return len(m)
-}
-
-func (m byDestination) Less(i, j int) bool {
-	return m.parts(i) < m.parts(j)
-}
-
-func (m byDestination) Swap(i, j int) {
-	m[i], m[j] = m[j], m[i]
-}
-
-func (m byDestination) parts(i int) int {
-	return strings.Count(filepath.Clean(m[i].Destination), string(os.PathSeparator))
+func parts(m spec.Mount) int {
+	// We must special case a root mount /.
+	// The count of "/" and "/proc" are both 1 but of course logically "/" must
+	// be mounted before "/proc" as such set the count to 0.
+	if m.Destination == "/" {
+		return 0
+	}
+	return strings.Count(filepath.Clean(m.Destination), string(os.PathSeparator))
 }
 
 func sortMounts(m []spec.Mount) []spec.Mount {
-	sort.Sort(byDestination(m))
+	slices.SortStableFunc(m, func(a, b spec.Mount) int {
+		aLen := parts(a)
+		bLen := parts(b)
+		if aLen < bLen {
+			return -1
+		}
+		if aLen == bLen {
+			return 0
+		}
+		return 1
+	})
 	return m
-}
-
-func validPodNSOption(p *Pod, ctrPod string) error {
-	if p == nil {
-		return fmt.Errorf("pod passed in was nil. Container may not be associated with a pod: %w", define.ErrInvalidArg)
-	}
-
-	if ctrPod == "" {
-		return fmt.Errorf("container is not a member of any pod: %w", define.ErrInvalidArg)
-	}
-
-	if ctrPod != p.ID() {
-		return fmt.Errorf("pod passed in is not the pod the container is associated with: %w", define.ErrInvalidArg)
-	}
-	return nil
 }
 
 // JSONDeepCopy performs a deep copy by performing a JSON encode/decode of the

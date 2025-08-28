@@ -18,11 +18,15 @@ type VolumeCreateOptions struct {
 	Options map[string]string `schema:"opts"`
 	// Ignore existing volumes
 	IgnoreIfExists bool `schema:"ignoreIfExist"`
+	// UID that the volume will be created as
+	UID *int `schema:"uid"`
+	// GID that the volume will be created as
+	GID *int `schema:"gid"`
 }
 
 type VolumeRmReport struct {
 	Err error
-	Id  string //nolint:revive,stylecheck
+	Id  string
 }
 type VolumeInspectReport struct {
 	*VolumeConfigResponse
@@ -38,14 +42,14 @@ type VolumeReloadReport struct {
 
 type VolumeMountReport struct {
 	Err  error
-	Id   string //nolint:revive,stylecheck
+	Id   string
 	Name string
 	Path string
 }
 
 type VolumeUnmountReport struct {
 	Err error
-	Id  string //nolint:revive,stylecheck
+	Id  string
 }
 
 type VolumeConfigResponse struct {

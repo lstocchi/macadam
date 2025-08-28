@@ -17,10 +17,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/containerd/platforms"
 	"github.com/containers/buildah"
 	"github.com/containers/buildah/define"
+	"github.com/containers/buildah/internal"
 	internalUtil "github.com/containers/buildah/internal/util"
 	"github.com/containers/buildah/pkg/parse"
 	"github.com/containers/buildah/util"
@@ -28,6 +30,7 @@ import (
 	"github.com/containers/common/pkg/config"
 	"github.com/containers/image/v5/docker"
 	"github.com/containers/image/v5/docker/reference"
+	"github.com/containers/image/v5/image"
 	"github.com/containers/image/v5/manifest"
 	"github.com/containers/image/v5/pkg/shortnames"
 	istorage "github.com/containers/image/v5/storage"
@@ -92,12 +95,7 @@ func BuildDockerfiles(ctx context.Context, store storage.Store, options define.B
 	}
 	logger.SetLevel(logrus.GetLevel())
 
-	var dockerfiles []io.ReadCloser
-	defer func(dockerfiles ...io.ReadCloser) {
-		for _, d := range dockerfiles {
-			d.Close()
-		}
-	}(dockerfiles...)
+	var dockerfiles []io.Reader
 
 	for _, tag := range append([]string{options.Output}, options.AdditionalTags...) {
 		if tag == "" {
@@ -109,7 +107,7 @@ func BuildDockerfiles(ctx context.Context, store storage.Store, options define.B
 	}
 
 	for _, dfile := range paths {
-		var data io.ReadCloser
+		var data io.Reader
 
 		if strings.HasPrefix(dfile, "http://") || strings.HasPrefix(dfile, "https://") {
 			logger.Debugf("reading remote Dockerfile %q", dfile)
@@ -117,8 +115,8 @@ func BuildDockerfiles(ctx context.Context, store storage.Store, options define.B
 			if err != nil {
 				return "", nil, err
 			}
+			defer resp.Body.Close()
 			if resp.ContentLength == 0 {
-				resp.Body.Close()
 				return "", nil, fmt.Errorf("no contents in %q", dfile)
 			}
 			data = resp.Body
@@ -145,13 +143,12 @@ func BuildDockerfiles(ctx context.Context, store storage.Store, options define.B
 			if err != nil {
 				return "", nil, fmt.Errorf("reading build instructions: %w", err)
 			}
+			defer contents.Close()
 			dinfo, err = contents.Stat()
 			if err != nil {
-				contents.Close()
 				return "", nil, fmt.Errorf("reading info about %q: %w", dfile, err)
 			}
 			if dinfo.Mode().IsRegular() && dinfo.Size() == 0 {
-				contents.Close()
 				return "", nil, fmt.Errorf("no contents in %q", dfile)
 			}
 			data = contents
@@ -163,7 +160,7 @@ func BuildDockerfiles(ctx context.Context, store storage.Store, options define.B
 			if err != nil {
 				return "", nil, err
 			}
-			data = io.NopCloser(pData)
+			data = pData
 		}
 
 		dockerfiles = append(dockerfiles, data)
@@ -223,6 +220,15 @@ func BuildDockerfiles(ctx context.Context, store storage.Store, options define.B
 		}
 	}
 
+	if sourceDateEpoch, ok := options.Args[internal.SourceDateEpochName]; ok && options.SourceDateEpoch == nil {
+		sde, err := strconv.ParseInt(sourceDateEpoch, 10, 64)
+		if err != nil {
+			return "", nil, fmt.Errorf("parsing SOURCE_DATE_EPOCH build-arg %q: %w", sourceDateEpoch, err)
+		}
+		sdeTime := time.Unix(sde, 0)
+		options.SourceDateEpoch = &sdeTime
+	}
+
 	systemContext := options.SystemContext
 	for _, platform := range options.Platforms {
 		platformContext := *systemContext
@@ -264,6 +270,16 @@ func BuildDockerfiles(ctx context.Context, store storage.Store, options define.B
 		}
 		// Deep copy args to prevent concurrent read/writes over Args.
 		platformOptions.Args = maps.Clone(options.Args)
+
+		if options.SourceDateEpoch != nil {
+			if options.Timestamp != nil {
+				return "", nil, errors.New("timestamp and source-date-epoch would be ambiguous if allowed together")
+			}
+			if _, alreadySet := platformOptions.Args[internal.SourceDateEpochName]; !alreadySet {
+				platformOptions.Args[internal.SourceDateEpochName] = fmt.Sprintf("%d", options.SourceDateEpoch.Unix())
+			}
+		}
+
 		builds.Go(func() error {
 			loggerPerPlatform := logger
 			if platformOptions.LogFile != "" && platformOptions.LogSplitByPlatform {
@@ -369,7 +385,7 @@ func BuildDockerfiles(ctx context.Context, store storage.Store, options define.B
 			return "", nil, err
 		}
 		defer imgSource.Close()
-		manifestBytes, _, err := imgSource.GetManifest(ctx, nil)
+		manifestBytes, _, err := image.UnparsedInstance(imgSource, nil).Manifest(ctx)
 		if err != nil {
 			return "", nil, err
 		}
@@ -423,16 +439,6 @@ func buildDockerfilesOnce(ctx context.Context, store storage.Store, logger *logr
 		if options.SystemContext.VariantChoice != "" {
 			builtinArgDefaults["TARGETPLATFORM"] += "/" + options.SystemContext.VariantChoice
 		}
-	} else {
-		// fill them in using values for the default platform
-		defaultPlatform := platforms.DefaultSpec()
-		builtinArgDefaults["TARGETOS"] = defaultPlatform.OS
-		builtinArgDefaults["TARGETVARIANT"] = defaultPlatform.Variant
-		builtinArgDefaults["TARGETARCH"] = defaultPlatform.Architecture
-		builtinArgDefaults["TARGETPLATFORM"] = defaultPlatform.OS + "/" + defaultPlatform.Architecture
-		if defaultPlatform.Variant != "" {
-			builtinArgDefaults["TARGETPLATFORM"] += "/" + defaultPlatform.Variant
-		}
 	}
 	delete(options.Args, "TARGETPLATFORM")
 
@@ -450,9 +456,8 @@ func buildDockerfilesOnce(ctx context.Context, store storage.Store, logger *logr
 		return "", nil, fmt.Errorf("creating build executor: %w", err)
 	}
 	b := imagebuilder.NewBuilder(options.Args)
-	for k, v := range builtinArgDefaults {
-		b.BuiltinArgDefaults[k] = v
-	}
+	maps.Copy(b.BuiltinArgDefaults, builtinArgDefaults)
+
 	defaultContainerConfig, err := config.Default()
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to get container config: %w", err)
@@ -465,7 +470,7 @@ func buildDockerfilesOnce(ctx context.Context, store storage.Store, logger *logr
 	if options.Target != "" {
 		stagesTargeted, ok := stages.ThroughTarget(options.Target)
 		if !ok {
-			return "", nil, fmt.Errorf("The target %q was not found in the provided Dockerfile", options.Target)
+			return "", nil, fmt.Errorf("the target %q was not found in the provided Dockerfile", options.Target)
 		}
 		stages = stagesTargeted
 	}
@@ -567,7 +572,7 @@ func platformsForBaseImages(ctx context.Context, logger *logrus.Logger, dockerfi
 				logrus.Debugf("preparing to read image manifest for %q: %v", baseImage, err)
 				continue
 			}
-			candidateBytes, candidateType, err := src.GetManifest(ctx, nil)
+			candidateBytes, candidateType, err := image.UnparsedInstance(src, nil).Manifest(ctx)
 			_ = src.Close()
 			if err != nil {
 				logrus.Debugf("reading image manifest for %q: %v", baseImage, err)

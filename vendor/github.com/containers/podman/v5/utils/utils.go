@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -49,22 +50,6 @@ func ExecCmdWithStdStreams(stdin io.Reader, stdout, stderr io.Writer, env []stri
 	return nil
 }
 
-// UntarToFileSystem untars an os.file of a tarball to a destination in the filesystem
-func UntarToFileSystem(dest string, tarball *os.File, options *archive.TarOptions) error {
-	logrus.Debugf("untarring %s", tarball.Name())
-	return archive.Untar(tarball, dest, options)
-}
-
-// Creates a new tar file and writes bytes from io.ReadCloser
-func CreateTarFromSrc(source string, dest string) error {
-	file, err := os.Create(dest)
-	if err != nil {
-		return fmt.Errorf("could not create tarball file '%s': %w", dest, err)
-	}
-	defer file.Close()
-	return TarChrootToFilesystem(source, file)
-}
-
 // TarToFilesystem creates a tarball from source and writes to an os.file
 // provided
 func TarToFilesystem(source string, tarball *os.File) error {
@@ -87,22 +72,6 @@ func Tar(source string) (io.ReadCloser, error) {
 	return archive.Tar(source, archive.Uncompressed)
 }
 
-// TarChrootToFilesystem creates a tarball from source and writes to an os.file
-// provided while chrooted to the source.
-func TarChrootToFilesystem(source string, tarball *os.File) error {
-	tb, err := TarWithChroot(source)
-	if err != nil {
-		return err
-	}
-	defer tb.Close()
-	_, err = io.Copy(tarball, tb)
-	if err != nil {
-		return err
-	}
-	logrus.Debugf("wrote tarball file %s", tarball.Name())
-	return nil
-}
-
 // TarWithChroot creates a tarball from source and returns a readcloser of it
 // while chrooted to the source.
 func TarWithChroot(source string) (io.ReadCloser, error) {
@@ -117,6 +86,27 @@ func GuardedRemoveAll(path string) error {
 		return fmt.Errorf("refusing to recursively delete `%s`", path)
 	}
 	return os.RemoveAll(path)
+}
+
+// RemoveFilesExcept removes all files in a directory except for the one specified
+// by excludeFile and will not delete certain catastrophic paths.
+func RemoveFilesExcept(path string, excludeFile string) error {
+	if path == "" || path == "/" {
+		return fmt.Errorf("refusing to recursively delete `%s`", path)
+	}
+
+	files, err := os.ReadDir(path)
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		if file.Name() != excludeFile {
+			if err := os.RemoveAll(filepath.Join(path, file.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func ProgressBar(prefix string, size int64, onComplete string) (*mpb.Progress, *mpb.Bar) {

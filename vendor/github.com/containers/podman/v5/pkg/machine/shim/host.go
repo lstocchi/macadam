@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/containers/podman/v5/pkg/machine"
@@ -24,12 +27,12 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+var ErrRemoveUserCancelled = errors.New("user cancelled the removal operation")
+
 // List is done at the host level to allow for a *possible* future where
 // more than one provider is used
 func List(vmstubbers []vmconfigs.VMProvider, _ machine.ListOptions) ([]*machine.ListResponse, error) {
-	var (
-		lrs []*machine.ListResponse
-	)
+	var lrs []*machine.ListResponse
 
 	for _, s := range vmstubbers {
 		dirs, err := env.GetMachineDirs(s.VMType())
@@ -46,15 +49,15 @@ func List(vmstubbers []vmconfigs.VMProvider, _ machine.ListOptions) ([]*machine.
 				return nil, err
 			}
 			lr := machine.ListResponse{
-				Name:      name,
-				CreatedAt: mc.Created,
-				LastUp:    mc.LastUp,
-				Running:   state == machineDefine.Running,
-				Starting:  mc.Starting,
-				//Stream:             "", // No longer applicable
+				Name:               name,
+				CreatedAt:          mc.Created,
+				LastUp:             mc.LastUp,
+				Running:            state == machineDefine.Running,
+				Starting:           mc.Starting,
 				VMType:             s.VMType().String(),
 				CPUs:               mc.Resources.CPUs,
 				Memory:             mc.Resources.Memory,
+				Swap:               mc.Swap,
 				DiskSize:           mc.Resources.DiskSize,
 				Port:               mc.SSH.Port,
 				RemoteUsername:     mc.SSH.RemoteUsername,
@@ -90,10 +93,6 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 			ForwardSockets: defaultCapabilities.GetForwardSockets(),
 		}
 	}
-	/* check the path to env.GetSSHIdentityPath */
-	/* ----> Can we make it configurable in initopts? */
-	/* Can we dynamically update vmconfig.SSH ? */
-	/* odd that username is in initopts, but ssh identity path is not */
 	sshIdentityPath := opts.SSHIdentityPath
 	if sshIdentityPath == "" {
 		sshIdentityPath, err = env.GetSSHIdentityPath(machineDefine.DefaultIdentityName)
@@ -110,8 +109,12 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 	if err != nil {
 		return err
 	}
-	machineLock.Lock()
-	defer machineLock.Unlock()
+
+	// If the machine is being re-launched, the lock is already held
+	if !opts.ReExec {
+		machineLock.Lock()
+		defer machineLock.Unlock()
+	}
 
 	mc, err := vmconfigs.NewMachineConfig(opts, dirs, sshIdentityPath, mp.VMType(), machineLock)
 	if err != nil {
@@ -122,12 +125,30 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 	mc.Capabilities = opts.Capabilities
 
 	createOpts := machineDefine.CreateVMOpts{
-		Name: opts.Name,
-		Dirs: dirs,
+		Name:   opts.Name,
+		Dirs:   dirs,
+		ReExec: opts.ReExec,
 	}
 
 	if umn := opts.UserModeNetworking; umn != nil {
 		createOpts.UserModeNetworking = *umn
+	}
+
+	// Mounts
+	if mp.VMType() != machineDefine.WSLVirt {
+		mc.Mounts = CmdLineVolumesToMounts(opts.Volumes, mp.MountType())
+	}
+
+	mc.CloudInitConfig, err = CmdLineCloudInitToConfig(opts.CloudInitFiles)
+	if err != nil {
+		return err
+	}
+
+	// Issue #18230 ... do not mount over important directories at the / level (subdirs are fine)
+	for _, mnt := range mc.Mounts {
+		if err := validateDestinationPaths(mnt.Target); err != nil {
+			return err
+		}
 	}
 
 	imagePuller := opts.ImagePuller
@@ -162,11 +183,6 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 
 	logrus.Debugf("--> imagePath is %q", imagePath.GetPath())
 
-	ignitionFile, err := mc.IgnitionFile()
-	if err != nil {
-		return err
-	}
-
 	uid := os.Getuid()
 	if uid == -1 { // windows compensation
 		uid = 1000
@@ -182,32 +198,6 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 		}
 	}
 
-	ignBuilder := ignition.NewIgnitionBuilder(ignition.DynamicIgnition{
-		Name:      userName,
-		Key:       sshKey,
-		TimeZone:  opts.TimeZone,
-		UID:       uid,
-		VMName:    opts.Name,
-		VMType:    mp.VMType(),
-		WritePath: ignitionFile.GetPath(),
-		Rootful:   opts.Rootful,
-	})
-
-	// If the user provides an ignition file, we need to
-	// copy it into the conf dir
-	if len(opts.IgnitionPath) > 0 {
-		err = ignBuilder.BuildWithIgnitionFile(opts.IgnitionPath)
-
-		if err != nil {
-			return err
-		}
-	} else {
-		err = ignBuilder.GenerateIgnitionConfig()
-		if err != nil {
-			return err
-		}
-	}
-
 	if len(opts.PlaybookPath) > 0 {
 		f, err := os.Open(opts.PlaybookPath)
 		if err != nil {
@@ -219,14 +209,6 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 		}
 
 		playbookDest := fmt.Sprintf("/home/%s/%s", userName, "playbook.yaml")
-
-		if mp.VMType() != machineDefine.WSLVirt {
-			err = ignBuilder.AddPlaybook(string(s), playbookDest, userName)
-			if err != nil {
-				return err
-			}
-		}
-
 		mc.Ansible = &vmconfigs.AnsibleConfig{
 			PlaybookPath: playbookDest,
 			Contents:     string(s),
@@ -234,26 +216,72 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 		}
 	}
 
-	readyIgnOpts, err := mp.PrepareIgnition(mc, &ignBuilder)
+	var ignBuilder *ignition.IgnitionBuilder
+	if !opts.CloudInit {
+		ignitionFile, err := mc.IgnitionFile()
+		if err != nil {
+			return err
+		}
+
+		tmpIgnBuilder := ignition.NewIgnitionBuilder(ignition.DynamicIgnition{
+			Name:      userName,
+			Key:       sshKey,
+			TimeZone:  opts.TimeZone,
+			UID:       uid,
+			VMName:    opts.Name,
+			VMType:    mp.VMType(),
+			WritePath: ignitionFile.GetPath(),
+			Rootful:   opts.Rootful,
+			Swap:      opts.Swap,
+		})
+		ignBuilder = &tmpIgnBuilder
+
+		// If the user provides an ignition file, we need to
+		// copy it into the conf dir
+		if len(opts.IgnitionPath) > 0 {
+			err = ignBuilder.BuildWithIgnitionFile(opts.IgnitionPath)
+
+			if err != nil {
+				return err
+			}
+		} else {
+			err = ignBuilder.GenerateIgnitionConfig()
+			if err != nil {
+				return err
+			}
+		}
+
+		if mp.VMType() != machineDefine.WSLVirt && mc.Ansible != nil {
+			err = ignBuilder.AddPlaybook(mc.Ansible.Contents, mc.Ansible.PlaybookPath, userName)
+			if err != nil {
+				return err
+			}
+		}
+
+		readyIgnOpts, err := mp.PrepareIgnition(mc, ignBuilder)
+		if err != nil {
+			return err
+		}
+
+		readyUnitFile, err := ignition.CreateReadyUnitFile(mp.VMType(), readyIgnOpts)
+		if err != nil {
+			return err
+		}
+
+		readyUnit := ignition.Unit{
+			Enabled:  ignition.BoolToPtr(true),
+			Name:     "ready.service",
+			Contents: ignition.StrToPtr(readyUnitFile),
+		}
+		ignBuilder.WithUnit(readyUnit)
+	}
+
+	// CreateVM could cause the init command to be re-launched in some cases (e.g. wsl)
+	// so we need to avoid creating the machine config or connections before this check happens.
+	// when relaunching, the invoked 'init' command will be responsible to set up the machine
+	err = mp.CreateVM(createOpts, mc, ignBuilder)
 	if err != nil {
 		return err
-	}
-
-	readyUnitFile, err := ignition.CreateReadyUnitFile(mp.VMType(), readyIgnOpts)
-	if err != nil {
-		return err
-	}
-
-	readyUnit := ignition.Unit{
-		Enabled:  ignition.BoolToPtr(true),
-		Name:     "ready.service",
-		Contents: ignition.StrToPtr(readyUnitFile),
-	}
-	ignBuilder.WithUnit(readyUnit)
-
-	// Mounts
-	if mp.VMType() != machineDefine.WSLVirt {
-		mc.Mounts = CmdLineVolumesToMounts(opts.Volumes, mp.MountType())
 	}
 
 	// TODO AddSSHConnectionToPodmanSocket could take an machineconfig instead
@@ -272,12 +300,7 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 		callbackFuncs.Add(cleanup)
 	}
 
-	err = mp.CreateVM(createOpts, mc, &ignBuilder)
-	if err != nil {
-		return err
-	}
-
-	if len(opts.IgnitionPath) == 0 {
+	if len(opts.IgnitionPath) == 0 && !opts.CloudInit {
 		if err := ignBuilder.Build(); err != nil {
 			return err
 		}
@@ -418,8 +441,8 @@ func stopLocked(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *mach
 	}
 
 	// Stop GvProxy and remove PID file
-	if !mp.UseProviderNetworkSetup() {
-		gvproxyPidFile, err := dirs.RuntimeDir.AppendToNewVMFile("gvproxy.pid", nil)
+	if !mp.UseProviderNetworkSetup(mc) {
+		gvproxyPidFile, err := machine.GetGVProxyPIDFile(mc, dirs)
 		if err != nil {
 			return err
 		}
@@ -436,6 +459,7 @@ func stopLocked(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *mach
 func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDefine.MachineDirs, opts machine.StartOptions) error {
 	defaultBackoff := 500 * time.Millisecond
 	maxBackoffs := 6
+	signalChanClosed := false
 
 	mc.Lock()
 	defer mc.Unlock()
@@ -467,20 +491,44 @@ func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDe
 		}
 	}
 
+	// if the machine cannot continue starting due to a signal, ensure the state
+	// reflects the machine is no longer starting
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig, ok := <-signalChan
+		if ok {
+			mc.Starting = false
+			logrus.Error("signal received when starting the machine: ", sig)
+
+			if err := mc.Write(); err != nil {
+				logrus.Error(err)
+			}
+
+			os.Exit(1)
+		}
+	}()
+
 	// Set starting to true
 	mc.Starting = true
 	if err := mc.Write(); err != nil {
 		logrus.Error(err)
 	}
+
 	// Set starting to false on exit
 	defer func() {
 		mc.Starting = false
 		if err := mc.Write(); err != nil {
 			logrus.Error(err)
 		}
+
+		if !signalChanClosed {
+			signal.Stop(signalChan)
+			close(signalChan)
+		}
 	}()
 
-	gvproxyPidFile, err := dirs.RuntimeDir.AppendToNewVMFile("gvproxy.pid", nil)
+	gvproxyPidFile, err := machine.GetGVProxyPIDFile(mc, dirs)
 	if err != nil {
 		return err
 	}
@@ -555,8 +603,11 @@ func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDe
 		return errors.New(msg)
 	}
 
-	// this expects to be able to ssh as root to the VM - switch to regular user + sudo?
-	// -> move it to a "PostStartVM()" interface method?
+	// now that the machine has transitioned into the running state, we don't need a goroutine listening for SIGINT or SIGTERM to handle state
+	signal.Stop(signalChan)
+	close(signalChan)
+	signalChanClosed = true
+
 	// this is a temporary solution to skip applying proxies for non-podman machines bc of a problem with bootc/macadam
 	// however this should be replaced by a specific IsBootc property
 	if mc.Capabilities.GetForwardSockets() {
@@ -566,15 +617,11 @@ func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDe
 	}
 
 	// mount the volumes to the VM
-	// only used on linux for QEMU, and could most likely use the same code as
-	// apple.GenerateSystemDFilesForVirtiofsMounts
-	// Then MountVolumesToVM can be removed
 	if err := mp.MountVolumesToVM(mc, opts.Quiet); err != nil {
 		return err
 	}
 
 	// update the podman/docker socket service if the host user has been modified at all (UID or Rootful)
-	// need to make this podman/docker socket optional
 	if mc.HostUser.Modified {
 		if machine.UpdatePodmanDockerSockService(mc) == nil {
 			// Reset modification state if there are no errors, otherwise ignore errors
@@ -586,24 +633,19 @@ func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDe
 		}
 	}
 
-	isFirstBoot, err := mc.IsFirstBoot()
-	if err != nil {
-		logrus.Error(err)
-	}
-	if mp.VMType() == machineDefine.WSLVirt && mc.Ansible != nil && isFirstBoot {
-		if err := machine.CommonSSHSilent(mc.Ansible.User, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, []string{"ansible-playbook", mc.Ansible.PlaybookPath}); err != nil {
+	if mp.VMType() == machineDefine.WSLVirt && mc.Ansible != nil && mc.IsFirstBoot() {
+		if err := machine.LocalhostSSHSilent(mc.Ansible.User, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, []string{"ansible-playbook", mc.Ansible.PlaybookPath}); err != nil {
 			logrus.Error(err)
 		}
 	}
 
 	// Provider is responsible for waiting
-	if mp.UseProviderNetworkSetup() {
+	if mp.UseProviderNetworkSetup(mc) {
 		return nil
 	}
 
 	noInfo := opts.NoInfo
 
-	// need to make this podman/docker socket optional
 	machine.WaitAPIAndPrintInfo(
 		forwardingState,
 		mc.Name,
@@ -649,7 +691,16 @@ func Set(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, opts machineDefin
 
 func Remove(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDefine.MachineDirs, opts machine.RemoveOptions) error {
 	mc.Lock()
-	defer mc.Unlock()
+	defer func() {
+		mc.Unlock()
+
+		// Remove the lock file
+		lockPath := lock.GetMachineLockPath(mc.Name, dirs.ConfigDir.GetPath())
+		if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
+			logrus.Errorf("failed to remove lock file at %s: %v", lockPath, err)
+			return
+		}
+	}()
 	if err := mc.Refresh(); err != nil {
 		return fmt.Errorf("reload config: %w", err)
 	}
@@ -697,7 +748,7 @@ func Remove(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineD
 			return err
 		}
 		if strings.ToLower(answer)[0] != 'y' {
-			return nil
+			return ErrRemoveUserCancelled
 		}
 	}
 
@@ -790,4 +841,28 @@ func Reset(mps []vmconfigs.VMProvider, opts machine.ResetOptions) error {
 		}
 	}
 	return resetErrors.ErrorOrNil()
+}
+
+func validateDestinationPaths(dest string) error {
+	// illegalMounts are locations at the / level of the podman machine where we do want users mounting directly over
+	illegalMounts := map[string]struct{}{
+		"/bin":  {},
+		"/boot": {},
+		"/dev":  {},
+		"/etc":  {},
+		"/home": {},
+		"/proc": {},
+		"/root": {},
+		"/run":  {},
+		"/sbin": {},
+		"/sys":  {},
+		"/tmp":  {},
+		"/usr":  {},
+		"/var":  {},
+	}
+	mountTarget := path.Clean(dest)
+	if _, ok := illegalMounts[mountTarget]; ok {
+		return fmt.Errorf("machine mount destination cannot be %q: consider another location or a subdirectory of an existing location", mountTarget)
+	}
+	return nil
 }

@@ -59,14 +59,6 @@ func StringsToErrors(strErrs []string) []error {
 	return errs
 }
 
-// SyncQuiet syncs a file and logs any error. Should only be used within
-// a defer.
-func SyncQuiet(f *os.File) {
-	if err := f.Sync(); err != nil {
-		logrus.Errorf("Unable to sync file %s: %q", f.Name(), err)
-	}
-}
-
 // CloseQuiet closes a file and logs any error. Should only be used within
 // a defer.
 func CloseQuiet(f *os.File) {
@@ -86,7 +78,7 @@ func Contains(err error, sub error) bool {
 // PodConflictErrorModel is used in remote connections with podman
 type PodConflictErrorModel struct {
 	Errs []string
-	Id   string //nolint:revive,stylecheck
+	Id   string
 }
 
 // ErrorModel is used in remote connections with podman

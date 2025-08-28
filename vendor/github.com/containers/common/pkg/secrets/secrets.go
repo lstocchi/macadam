@@ -3,8 +3,11 @@ package secrets
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/containers/common/pkg/secrets/define"
@@ -12,9 +15,7 @@ import (
 	"github.com/containers/common/pkg/secrets/passdriver"
 	"github.com/containers/common/pkg/secrets/shelldriver"
 	"github.com/containers/storage/pkg/lockfile"
-	"github.com/containers/storage/pkg/regexp"
 	"github.com/containers/storage/pkg/stringid"
-	"golang.org/x/exp/maps"
 )
 
 // maxSecretSize is the max size for secret data - 512kB
@@ -47,12 +48,11 @@ var errAmbiguous = errors.New("secret is ambiguous")
 // errDataSize indicates that the secret data is too large or too small
 var errDataSize = errors.New("secret data must be larger than 0 and less than 512000 bytes")
 
+// errIgnoreIfExistsAndReplace indicates that ignoreIfExists and replace cannot be used together.
+var errIgnoreIfExistsAndReplace = errors.New("ignoreIfExists and replace cannot be used together")
+
 // secretsFile is the name of the file that the secrets database will be stored in
 var secretsFile = "secrets.json"
-
-// secretNameRegexp matches valid secret names
-// Allowed: 253 characters, excluding ,/=\0
-var secretNameRegexp = regexp.Delayed("^[^,/=\000]+$")
 
 // SecretsManager holds information on handling secrets
 //
@@ -117,6 +117,8 @@ type StoreOptions struct {
 	Labels map[string]string
 	// Replace existing secret
 	Replace bool
+	// Ignore if already exists
+	IgnoreIfExists bool
 }
 
 // NewManager creates a new secrets manager
@@ -169,9 +171,14 @@ func (s *SecretsManager) Store(name string, data []byte, driverType string, opti
 		return "", err
 	}
 
-	if !(len(data) > 0 && len(data) < maxSecretSize) {
+	if len(data) == 0 || len(data) >= maxSecretSize {
 		return "", errDataSize
 	}
+
+	if options.IgnoreIfExists && options.Replace {
+		return "", errIgnoreIfExistsAndReplace
+	}
+
 	var secr *Secret
 	s.lockfile.Lock()
 	defer s.lockfile.Unlock()
@@ -182,12 +189,15 @@ func (s *SecretsManager) Store(name string, data []byte, driverType string, opti
 	}
 
 	if exist {
-		if !options.Replace {
+		if !options.Replace && !options.IgnoreIfExists {
 			return "", fmt.Errorf("%s: %w", name, errSecretNameInUse)
 		}
 		secr, err = s.lookupSecret(name)
 		if err != nil {
 			return "", err
+		}
+		if options.IgnoreIfExists {
+			return secr.ID, nil
 		}
 		secr.UpdatedAt = time.Now()
 	} else {
@@ -294,7 +304,7 @@ func (s *SecretsManager) List() ([]Secret, error) {
 	if err != nil {
 		return nil, err
 	}
-	return maps.Values(secrets), nil
+	return slices.Collect(maps.Values(secrets)), nil
 }
 
 // LookupSecretData returns secret metadata as well as secret data in bytes.
@@ -320,9 +330,7 @@ func (s *SecretsManager) LookupSecretData(nameOrID string) (*Secret, []byte, err
 
 // validateSecretName checks if the secret name is valid.
 func validateSecretName(name string) error {
-	if len(name) == 0 ||
-		len(name) > 253 ||
-		!secretNameRegexp.MatchString(name) {
+	if len(name) == 0 || len(name) > 253 || strings.ContainsAny(name, ",/=\000") {
 		return fmt.Errorf("secret name %q can not include '=', '/', ',', or the '\\0' (NULL) and be between 1 and 253 characters: %w", name, errInvalidSecretName)
 	}
 	return nil

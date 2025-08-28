@@ -24,7 +24,6 @@ const registriesConf = `unqualified-search-registries=["docker.io"]
 
 const appendPort = `grep -q Port\ %d /etc/ssh/sshd_config || echo Port %d >> /etc/ssh/sshd_config`
 
-//nolint:unused
 const changePort = `sed -E -i 's/^Port[[:space:]]+[0-9]+/Port %d/' /etc/ssh/sshd_config`
 
 const configServices = `ln -fs /usr/lib/systemd/system/sshd.service /etc/systemd/system/multi-user.target.wants/sshd.service
@@ -43,10 +42,15 @@ chown [USER]:[USER] /home/[USER]/.config
 `
 
 const configServicesPodman = `mkdir -p /etc/containers/registries.conf.d
+ln -fs /usr/lib/systemd/user/podman.socket /etc/systemd/user/sockets.target.wants/podman.socket
 ln -fs /usr/lib/systemd/system/podman.socket /etc/systemd/system/sockets.target.wants/podman.socket
 ` + configServices
 
 const sudoers = `%wheel        ALL=(ALL)       NOPASSWD: ALL
+`
+
+const bootstrapSystemdConfig = `#!/bin/bash
+nohup bash -c 'while true; do sleep 60; done' >/dev/null 2>&1 &
 `
 
 const bootstrap = `#!/bin/bash
@@ -63,6 +67,8 @@ or type exit. This also means to log out you need to exit twice.
 `
 
 const sysdpid = "SYSDPID=`ps -eo cmd,pid | grep -m 1 ^/lib/systemd/systemd | awk '{print $2}'`"
+
+const sysdpidSystemdConfig = "SYSDPID=`grep -q systemd /proc/1/comm && echo '1' || echo '0'`"
 
 const profile = sysdpid + `
 if [ ! -z "$SYSDPID" ] && [ "$SYSDPID" != "1" ]; then
@@ -96,6 +102,10 @@ const wslConf = `[user]
 default=[USER]
 `
 
+const wslSystemdConf = `[boot]
+systemd=true
+`
+
 const wslConfUserNet = `
 [network]
 generateResolvConf = false
@@ -108,19 +118,6 @@ nameserver 192.168.127.1
 // WSL kernel does not have sg and crypto_user modules
 const overrideSysusers = `[Service]
 LoadCredential=
-`
-
-const lingerService = `[Unit]
-Description=A systemd user unit demo
-After=network-online.target
-Wants=network-online.target podman.socket
-[Service]
-ExecStart=/usr/bin/sleep infinity
-`
-
-const lingerSetup = `mkdir -p /home/[USER]/.config/systemd/user/default.target.wants
-ln -fs /home/[USER]/.config/systemd/user/linger-example.service \
-       /home/[USER]/.config/systemd/user/default.target.wants/linger-example.service
 `
 
 const bindMountSystemService = `
@@ -190,17 +187,6 @@ outlined in the following article:
 http://docs.microsoft.com/en-us/windows/wsl/install
 
 `
-
-const wslKernelError = `Could not %s. See previous output for any potential failure details.
-If you can not resolve the issue, try rerunning the "podman machine init command". If that fails
-try the "wsl --update" command and then rerun "podman machine init". Finally, if all else fails,
-try following the steps outlined in the following article:
-
-http://docs.microsoft.com/en-us/windows/wsl/install
-
-`
-
-const wslInstallKernel = "install the WSL Kernel"
 
 const wslOldVersion = `Automatic installation of WSL can not be performed on this version of Windows
 Either update to Build 19041 (or later), or perform the manual installation steps

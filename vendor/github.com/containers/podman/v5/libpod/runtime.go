@@ -34,6 +34,7 @@ import (
 	"github.com/containers/podman/v5/libpod/shutdown"
 	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/containers/podman/v5/pkg/domain/entities/reports"
+	artStore "github.com/containers/podman/v5/pkg/libartifact/store"
 	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/containers/podman/v5/pkg/systemd"
 	"github.com/containers/podman/v5/pkg/util"
@@ -82,6 +83,9 @@ type Runtime struct {
 	libimageRuntime        *libimage.Runtime
 	libimageEventsShutdown chan bool
 	lockManager            lock.Manager
+
+	// ArtifactStore returns the artifact store created from the runtime.
+	ArtifactStore func() (*artStore.ArtifactStore, error)
 
 	// Worker
 	workerChannel chan func()
@@ -170,15 +174,6 @@ func NewRuntime(ctx context.Context, options ...RuntimeOption) (*Runtime, error)
 		return nil, err
 	}
 	return newRuntimeFromConfig(ctx, conf, options...)
-}
-
-// NewRuntimeFromConfig creates a new container runtime using the given
-// configuration file for its default configuration. Passed RuntimeOption
-// functions can be used to mutate this configuration further.
-// An error will be returned if the configuration file at the given path does
-// not exist or cannot be loaded
-func NewRuntimeFromConfig(ctx context.Context, userConfig *config.Config, options ...RuntimeOption) (*Runtime, error) {
-	return newRuntimeFromConfig(ctx, userConfig, options...)
 }
 
 func newRuntimeFromConfig(ctx context.Context, conf *config.Config, options ...RuntimeOption) (*Runtime, error) {
@@ -533,6 +528,11 @@ func makeRuntime(ctx context.Context, runtime *Runtime) (retErr error) {
 		}
 		runtime.config.Network.NetworkBackend = string(netBackend)
 		runtime.network = netInterface
+
+		// Using sync once value to only init the store exactly once and only when it will be actually be used.
+		runtime.ArtifactStore = sync.OnceValues(func() (*artStore.ArtifactStore, error) {
+			return artStore.NewArtifactStore(filepath.Join(runtime.storageConfig.GraphRoot, "artifacts"), runtime.SystemContext())
+		})
 	}
 
 	// We now need to see if the system has restarted
@@ -1307,7 +1307,18 @@ func (r *Runtime) PruneBuildContainers() ([]*reports.PruneReport, error) {
 func (r *Runtime) SystemCheck(ctx context.Context, options entities.SystemCheckOptions) (entities.SystemCheckReport, error) {
 	what := storage.CheckEverything()
 	if options.Quick {
-		what = storage.CheckMost()
+		// Turn off checking layer digests and layer contents to do quick check.
+		// This is not a complete check like storage.CheckEverything(), and may fail detecting
+		// whether a file is missing from the image or its content has changed.
+		// In some cases it's desirable to trade check thoroughness for speed.
+		what = &storage.CheckOptions{
+			LayerDigests:   false,
+			LayerMountable: true,
+			LayerContents:  false,
+			LayerData:      true,
+			ImageData:      true,
+			ContainerData:  true,
+		}
 	}
 	if options.UnreferencedLayerMaximumAge != nil {
 		tmp := *options.UnreferencedLayerMaximumAge

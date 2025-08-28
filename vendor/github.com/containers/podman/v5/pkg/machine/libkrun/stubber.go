@@ -22,6 +22,10 @@ const (
 	localhostURI  = "http://localhost"
 )
 
+var (
+	exclusiveActive = true
+)
+
 type LibKrunStubber struct {
 	vmconfigs.AppleHVConfig
 }
@@ -30,7 +34,7 @@ func (l *LibKrunStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.Machin
 	mc.LibKrunHypervisor = new(vmconfigs.LibKrunConfig)
 	mc.LibKrunHypervisor.KRun = vfkit.Helper{}
 
-	bl := vfConfig.NewEFIBootloader(fmt.Sprintf("%s/efi-bl-%s", opts.Dirs.DataDir.GetPath(), opts.Name), true)
+	bl := vfConfig.NewEFIBootloader(apple.EfiVarsPath(opts.Dirs.DataDir, opts.Name), true)
 	mc.LibKrunHypervisor.KRun.VirtualMachine = vfConfig.NewVirtualMachine(uint(mc.Resources.CPUs), uint64(mc.Resources.Memory), bl)
 
 	randPort, err := utils.GetRandomPort()
@@ -39,17 +43,19 @@ func (l *LibKrunStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.Machin
 	}
 	mc.LibKrunHypervisor.KRun.Endpoint = localhostURI + ":" + strconv.Itoa(randPort)
 
-	virtiofsMounts := make([]machine.VirtIoFs, 0, len(mc.Mounts))
-	for _, mnt := range mc.Mounts {
-		virtiofsMounts = append(virtiofsMounts, machine.MountToVirtIOFs(mnt))
-	}
+	if builder != nil {
+		virtiofsMounts := make([]machine.VirtIoFs, 0, len(mc.Mounts))
+		for _, mnt := range mc.Mounts {
+			virtiofsMounts = append(virtiofsMounts, machine.MountToVirtIOFs(mnt))
+		}
 
-	// Populate the ignition file with virtiofs stuff
-	virtIOIgnitionMounts, err := apple.GenerateSystemDFilesForVirtiofsMounts(virtiofsMounts)
-	if err != nil {
-		return err
+		// Populate the ignition file with virtiofs stuff
+		virtIOIgnitionMounts, err := apple.GenerateSystemDFilesForVirtiofsMounts(virtiofsMounts)
+		if err != nil {
+			return err
+		}
+		builder.WithUnit(virtIOIgnitionMounts...)
 	}
-	builder.WithUnit(virtIOIgnitionMounts...)
 
 	return apple.ResizeDisk(mc, mc.Resources.DiskSize)
 }
@@ -72,7 +78,7 @@ func (l *LibKrunStubber) MountVolumesToVM(mc *vmconfigs.MachineConfig, quiet boo
 }
 
 func (l *LibKrunStubber) Remove(mc *vmconfigs.MachineConfig) ([]string, func() error, error) {
-	return []string{}, func() error { return nil }, nil
+	return apple.Remove(mc)
 }
 
 func (l *LibKrunStubber) RemoveAndCleanMachines(dirs *define.MachineDirs) error {
@@ -123,12 +129,16 @@ func (l *LibKrunStubber) UserModeNetworkEnabled(mc *vmconfigs.MachineConfig) boo
 	return true
 }
 
-func (l *LibKrunStubber) UseProviderNetworkSetup() bool {
+func (l *LibKrunStubber) UseProviderNetworkSetup(_ *vmconfigs.MachineConfig) bool {
 	return false
 }
 
+func (l *LibKrunStubber) SetExclusiveActive(exclusive bool) {
+	exclusiveActive = exclusive
+}
+
 func (l *LibKrunStubber) RequireExclusiveActive() bool {
-	return true
+	return exclusiveActive
 }
 
 func (l *LibKrunStubber) UpdateSSHPort(mc *vmconfigs.MachineConfig, port int) error {

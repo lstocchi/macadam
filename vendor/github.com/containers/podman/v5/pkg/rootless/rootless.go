@@ -49,7 +49,7 @@ func TryJoinPauseProcess(pausePidPath string) (bool, int, error) {
 	if err != nil {
 		// It is still failing.  We can safely remove it.
 		os.Remove(pausePidPath)
-		return false, -1, nil //nolint: nilerr
+		return false, -1, nil
 	}
 	return became, ret, err
 }
@@ -112,17 +112,6 @@ func countAvailableIDs(mappings []user.IDMap) int64 {
 		availableUids += r.Count
 	}
 	return availableUids
-}
-
-// GetAvailableUids returns how many UIDs are available in the
-// current user namespace.
-func GetAvailableUids() (int64, error) {
-	uids, err := GetAvailableUIDMap()
-	if err != nil {
-		return -1, err
-	}
-
-	return countAvailableIDs(uids), nil
 }
 
 // GetAvailableGids returns how many GIDs are available in the

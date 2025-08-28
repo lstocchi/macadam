@@ -25,7 +25,6 @@ const (
 	kubeFilePermission = 0644
 )
 
-//nolint:revive
 type KubeVolumeType int
 
 const (
@@ -40,7 +39,6 @@ const (
 	KubeVolumeTypeImage
 )
 
-//nolint:revive
 type KubeVolume struct {
 	// Type of volume to create
 	Type KubeVolumeType
@@ -169,9 +167,8 @@ func VolumeFromSecret(secretSource *v1.SecretVolumeSource, secretsManager *secre
 
 	secret := &v1.Secret{}
 
-	err = yaml.Unmarshal(secretByte, secret)
-	if err != nil {
-		return nil, err
+	if err := yaml.Unmarshal(secretByte, secret); err != nil {
+		return nil, fmt.Errorf("only secrets created via the kube yaml file are supported: %w", err)
 	}
 
 	// If there are Items specified in the volumeSource, that overwrites the Data from the Secret

@@ -45,9 +45,9 @@ func Attach(ctx context.Context, nameOrID string, stdin io.Reader, stdout io.Wri
 		stdout bool
 		stderr bool
 	}{
-		stdin:  !(stdin == nil || reflect.ValueOf(stdin).IsNil()),
-		stdout: !(stdout == nil || reflect.ValueOf(stdout).IsNil()),
-		stderr: !(stderr == nil || reflect.ValueOf(stderr).IsNil()),
+		stdin:  stdin != nil && !reflect.ValueOf(stdin).IsNil(),
+		stdout: stdout != nil && !reflect.ValueOf(stdout).IsNil(),
+		stderr: stderr != nil && !reflect.ValueOf(stderr).IsNil(),
 	}
 	// Ensure golang can determine that interfaces are "really" nil
 	if !isSet.stdin {
@@ -138,7 +138,7 @@ func Attach(ctx context.Context, nameOrID string, stdin io.Reader, stdout io.Wri
 		return err
 	}
 
-	if !(response.IsSuccess() || response.IsInformational()) {
+	if !response.IsSuccess() && !response.IsInformational() {
 		defer response.Body.Close()
 		return response.Process(nil)
 	}
@@ -166,7 +166,10 @@ func Attach(ctx context.Context, nameOrID string, stdin io.Reader, stdout io.Wri
 			logrus.Debugf("Copying STDIN to socket")
 
 			_, err := detach.Copy(socket, stdin, detachKeysInBytes)
-			if err != nil && err != define.ErrDetach {
+			// Ignore "closed network connection" as it occurs when the container ends, which is expected.
+			// This avoids noisy logs but does not fix the goroutine leak
+			// https://github.com/containers/podman/issues/25344
+			if err != nil && err != define.ErrDetach && !errors.Is(err, net.ErrClosed) {
 				logrus.Errorf("Failed to write input to service: %v", err)
 			}
 			if err == nil {
@@ -216,7 +219,7 @@ func Attach(ctx context.Context, nameOrID string, stdin io.Reader, stdout io.Wri
 			// Read multiplexed channels and write to appropriate stream
 			fd, l, err := DemuxHeader(socket, buffer)
 			if err != nil {
-				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				if errors.Is(err, io.EOF) {
 					return nil
 				}
 				return err
@@ -226,26 +229,26 @@ func Attach(ctx context.Context, nameOrID string, stdin io.Reader, stdout io.Wri
 				return err
 			}
 
-			switch {
-			case fd == 0:
+			switch fd {
+			case 0:
 				if isSet.stdout {
-					if _, err := stdout.Write(frame[0:l]); err != nil {
+					if _, err := stdout.Write(frame); err != nil {
 						return err
 					}
 				}
-			case fd == 1:
+			case 1:
 				if isSet.stdout {
-					if _, err := stdout.Write(frame[0:l]); err != nil {
+					if _, err := stdout.Write(frame); err != nil {
 						return err
 					}
 				}
-			case fd == 2:
+			case 2:
 				if isSet.stderr {
-					if _, err := stderr.Write(frame[0:l]); err != nil {
+					if _, err := stderr.Write(frame); err != nil {
 						return err
 					}
 				}
-			case fd == 3:
+			case 3:
 				return fmt.Errorf("from service from stream: %s", frame)
 			default:
 				return fmt.Errorf("unrecognized channel '%d' in header, 0-3 supported", fd)
@@ -256,12 +259,8 @@ func Attach(ctx context.Context, nameOrID string, stdin io.Reader, stdout io.Wri
 
 // DemuxHeader reads header for stream from server multiplexed stdin/stdout/stderr/2nd error channel
 func DemuxHeader(r io.Reader, buffer []byte) (fd, sz int, err error) {
-	n, err := io.ReadFull(r, buffer[0:8])
+	_, err = io.ReadFull(r, buffer[0:8])
 	if err != nil {
-		return
-	}
-	if n < 8 {
-		err = io.ErrUnexpectedEOF
 		return
 	}
 
@@ -281,13 +280,9 @@ func DemuxFrame(r io.Reader, buffer []byte, length int) (frame []byte, err error
 		buffer = append(buffer, make([]byte, length-len(buffer)+1)...)
 	}
 
-	n, err := io.ReadFull(r, buffer[0:length])
+	_, err = io.ReadFull(r, buffer[0:length])
 	if err != nil {
 		return nil, err
-	}
-	if n < length {
-		err = io.ErrUnexpectedEOF
-		return
 	}
 
 	return buffer[0:length], nil
@@ -392,6 +387,12 @@ func setRawTerminal(file *os.File) (*terminal.State, error) {
 }
 
 // ExecStartAndAttach starts and attaches to a given exec session.
+//
+// NOTE: When options.GetAttachInput() is true, this function currently leaks a goroutine reading from that stream
+// even if the ctx is cancelled. The goroutine will only exit if the input stream is closed. For example,
+// if stdin is `os.Stdin` attached to a tty, the goroutine will consume a chunk of user input from the
+// terminal even after the exec session has exited. In this scenario the os.Stdin stream will not be expected
+// to be closed.
 func ExecStartAndAttach(ctx context.Context, sessionID string, options *ExecStartAndAttachOptions) error {
 	if options == nil {
 		options = new(ExecStartAndAttachOptions)
@@ -487,7 +488,7 @@ func ExecStartAndAttach(ctx context.Context, sessionID string, options *ExecStar
 	}
 	defer response.Body.Close()
 
-	if !(response.IsSuccess() || response.IsInformational()) {
+	if !response.IsSuccess() && !response.IsInformational() {
 		return response.Process(nil)
 	}
 
@@ -504,14 +505,19 @@ func ExecStartAndAttach(ctx context.Context, sessionID string, options *ExecStar
 		go func() {
 			logrus.Debugf("Copying STDIN to socket")
 			_, err := detach.Copy(socket, options.InputStream, []byte{})
-			if err != nil {
+			// Ignore "closed network connection" as it occurs when the exec ends, which is expected.
+			// This avoids noisy logs but does not fix the goroutine leak
+			// https://github.com/containers/podman/issues/25344
+			if err != nil && !errors.Is(err, net.ErrClosed) {
 				logrus.Errorf("Failed to write input to service: %v", err)
 			}
 
-			if closeWrite, ok := socket.(CloseWriter); ok {
-				logrus.Debugf("Closing STDIN")
-				if err := closeWrite.CloseWrite(); err != nil {
-					logrus.Warnf("Failed to close STDIN for writing: %v", err)
+			if err == nil {
+				if closeWrite, ok := socket.(CloseWriter); ok {
+					logrus.Debugf("Closing STDIN")
+					if err := closeWrite.CloseWrite(); err != nil {
+						logrus.Warnf("Failed to close STDIN for writing: %v", err)
+					}
 				}
 			}
 		}()
@@ -534,7 +540,7 @@ func ExecStartAndAttach(ctx context.Context, sessionID string, options *ExecStar
 			// Read multiplexed channels and write to appropriate stream
 			fd, l, err := DemuxHeader(socket, buffer)
 			if err != nil {
-				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				if errors.Is(err, io.EOF) {
 					return nil
 				}
 				return err
@@ -544,28 +550,28 @@ func ExecStartAndAttach(ctx context.Context, sessionID string, options *ExecStar
 				return err
 			}
 
-			switch {
-			case fd == 0:
+			switch fd {
+			case 0:
 				if options.GetAttachInput() {
 					// Write STDIN to STDOUT (echoing characters
 					// typed by another attach session)
-					if _, err := options.GetOutputStream().Write(frame[0:l]); err != nil {
+					if _, err := options.GetOutputStream().Write(frame); err != nil {
 						return err
 					}
 				}
-			case fd == 1:
+			case 1:
 				if options.GetAttachOutput() {
-					if _, err := options.GetOutputStream().Write(frame[0:l]); err != nil {
+					if _, err := options.GetOutputStream().Write(frame); err != nil {
 						return err
 					}
 				}
-			case fd == 2:
+			case 2:
 				if options.GetAttachError() {
-					if _, err := options.GetErrorStream().Write(frame[0:l]); err != nil {
+					if _, err := options.GetErrorStream().Write(frame); err != nil {
 						return err
 					}
 				}
-			case fd == 3:
+			case 3:
 				return fmt.Errorf("from service from stream: %s", frame)
 			default:
 				return fmt.Errorf("unrecognized channel '%d' in header, 0-3 supported", fd)

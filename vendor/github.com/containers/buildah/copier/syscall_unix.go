@@ -70,6 +70,13 @@ func lutimes(_ bool, path string, atime, mtime time.Time) error {
 	return unix.Lutimes(path, []unix.Timeval{unix.NsecToTimeval(atime.UnixNano()), unix.NsecToTimeval(mtime.UnixNano())})
 }
 
+func owner(info os.FileInfo) (int, int, error) {
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		return int(st.Uid), int(st.Gid), nil
+	}
+	return -1, -1, syscall.ENOSYS
+}
+
 // sameDevice returns true unless we're sure that they're not on the same device
 func sameDevice(a, b os.FileInfo) bool {
 	aSys := a.Sys()
@@ -84,8 +91,3 @@ func sameDevice(a, b os.FileInfo) bool {
 	}
 	return uA.Dev == uB.Dev
 }
-
-const (
-	testModeMask           = int64(os.ModePerm)
-	testIgnoreSymlinkDates = false
-)

@@ -301,9 +301,13 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 
 	// TODO: We don't understand why specgen does not take of this, but
 	// integration tests clearly pointed out that it was required.
-	imageData, err := opts.Image.Inspect(ctx, nil)
-	if err != nil {
-		return nil, err
+	var imageData *libimage.ImageData
+	if opts.Image != nil {
+		var err error
+		imageData, err = opts.Image.Inspect(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
 	}
 	s.WorkDir = "/"
 	// Entrypoint/Command handling is based off of
@@ -373,6 +377,42 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 
 	if apparmor, ok := opts.Annotations[define.InspectAnnotationApparmor+"/"+opts.Container.Name]; ok {
 		s.Annotations[define.InspectAnnotationApparmor] = apparmor
+	}
+
+	if pidslimit, ok := annotations[define.PIDsLimitAnnotation+"/"+opts.Container.Name]; ok {
+		s.Annotations[define.PIDsLimitAnnotation] = pidslimit
+		pidslimitAsInt, err := strconv.ParseInt(pidslimit, 10, 0)
+		if err != nil {
+			return nil, err
+		}
+		if s.ResourceLimits == nil {
+			s.ResourceLimits = &spec.LinuxResources{}
+		}
+		s.ResourceLimits.Pids = &spec.LinuxPids{
+			Limit: pidslimitAsInt,
+		}
+	}
+
+	if cpuset, ok := annotations[define.CpusetAnnotation+"/"+opts.Container.Name]; ok {
+		s.Annotations[define.CpusetAnnotation] = cpuset
+		if s.ResourceLimits == nil {
+			s.ResourceLimits = &spec.LinuxResources{}
+		}
+		if s.ResourceLimits.CPU == nil {
+			s.ResourceLimits.CPU = &spec.LinuxCPU{}
+		}
+		s.ResourceLimits.CPU.Cpus = cpuset
+	}
+
+	if memNodes, ok := annotations[define.MemoryNodesAnnotation+"/"+opts.Container.Name]; ok {
+		s.Annotations[define.MemoryNodesAnnotation] = memNodes
+		if s.ResourceLimits == nil {
+			s.ResourceLimits = &spec.LinuxResources{}
+		}
+		if s.ResourceLimits.CPU == nil {
+			s.ResourceLimits.CPU = &spec.LinuxCPU{}
+		}
+		s.ResourceLimits.CPU.Mems = memNodes
 	}
 
 	if label, ok := opts.Annotations[define.InspectAnnotationLabel+"/"+opts.Container.Name]; ok {
@@ -614,6 +654,14 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 	if opts.TerminationGracePeriodSeconds != nil {
 		timeout := uint(*opts.TerminationGracePeriodSeconds)
 		s.StopTimeout = &timeout
+	}
+
+	if lifecycle := opts.Container.Lifecycle; lifecycle != nil && lifecycle.StopSignal != nil {
+		stopSignal, err := util.ParseSignal(*lifecycle.StopSignal)
+		if err != nil {
+			return nil, err
+		}
+		s.StopSignal = &stopSignal
 	}
 
 	return s, nil

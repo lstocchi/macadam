@@ -27,8 +27,7 @@ type MachineConfig struct {
 	SSH       SSHConfig
 	Version   uint
 
-	// Image stuff
-	imageDescription machineImage //nolint:unused
+	Swap strongunits.MiB
 
 	ImagePath *define.VMFile // Temporary only until a proper image struct is worked out
 
@@ -39,7 +38,7 @@ type MachineConfig struct {
 	QEMUHypervisor    *QEMUConfig    `json:",omitempty"`
 	WSLHypervisor     *WSLConfig     `json:",omitempty"`
 
-	lock *lockfile.LockFile //nolint:unused
+	lock *lockfile.LockFile
 
 	// configPath can be used for reading, writing, removing
 	configPath *define.VMFile
@@ -58,28 +57,15 @@ type MachineConfig struct {
 
 	CloudInit    bool
 	Capabilities *define.MachineCapabilities
+	IPAddress    string
+	// user-data, meta-data and network-config cloud-init configuration files
+	CloudInitConfig CloudInitConfig
 }
 
-type machineImage interface { //nolint:unused
-	download() error
-	path() string
-}
-
-type OCIMachineImage struct {
-	// registry
-	// TODO JSON serial/deserial will write string to disk
-	// but in code it is a types.ImageReference
-
-	// quay.io/podman/podman-machine-image:5.0
-	FQImageReference string
-}
-
-func (o OCIMachineImage) path() string {
-	return ""
-}
-
-func (o OCIMachineImage) download() error {
-	return nil
+type CloudInitConfig struct {
+	UserData      *define.VMFile
+	MetaData      *define.VMFile
+	NetworkConfig *define.VMFile
 }
 
 type VMProvider interface { //nolint:interfacebloat
@@ -99,7 +85,8 @@ type VMProvider interface { //nolint:interfacebloat
 	StopHostNetworking(mc *MachineConfig, vmType define.VMType) error
 	VMType() define.VMType
 	UserModeNetworkEnabled(mc *MachineConfig) bool
-	UseProviderNetworkSetup() bool
+	UseProviderNetworkSetup(mc *MachineConfig) bool
+	SetExclusiveActive(exclusive bool)
 	RequireExclusiveActive() bool
 	UpdateSSHPort(mc *MachineConfig, port int) error
 	GetRosetta(mc *MachineConfig) (bool, error)

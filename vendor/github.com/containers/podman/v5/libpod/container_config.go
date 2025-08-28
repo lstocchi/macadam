@@ -162,6 +162,8 @@ type ContainerRootFSConfig struct {
 	// moved out of Libpod into pkg/specgen).
 	// Please DO NOT reuse the `imageVolumes` name in container JSON again.
 	ImageVolumes []*ContainerImageVolume `json:"ctrImageVolumes,omitempty"`
+	// ArtifactVolumes lists the artifact volumes to mount into the container.
+	ArtifactVolumes []*ContainerArtifactVolume `json:"artifactVolumes,omitempty"`
 	// CreateWorkingDir indicates that Libpod should create the container's
 	// working directory if it does not exist. Some OCI runtimes do this by
 	// default, but others do not.
@@ -376,7 +378,7 @@ type ContainerMiscConfig struct {
 	LogPath string `json:"logPath"`
 	// LogTag is the tag used for logging
 	LogTag string `json:"logTag"`
-	// LogSize is the tag used for logging
+	// LogSize is the maximum size of the container's log file
 	LogSize int64 `json:"logSize"`
 	// LogDriver driver for logs
 	LogDriver string `json:"logDriver"`
@@ -402,6 +404,9 @@ type ContainerMiscConfig struct {
 	// IsInfra is a bool indicating whether this container is an infra container used for
 	// sharing kernel namespaces in a pod
 	IsInfra bool `json:"pause"`
+	// IsDefaultInfra is a bool indicating whether this container is a default infra container
+	// using the default rootfs with catatonit bind-mounted into it.
+	IsDefaultInfra bool `json:"defaultPause"`
 	// IsService is a bool indicating whether this container is a service container used for
 	// tracking the life cycle of K8s service.
 	IsService bool `json:"isService"`

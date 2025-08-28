@@ -5,17 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/containers/podman/v5/pkg/machine/define"
 
 	"github.com/containers/podman/v5/pkg/machine/env"
-
-	"github.com/lima-vm/go-qcow2reader"
-	"github.com/lima-vm/go-qcow2reader/convert"
-	"github.com/lima-vm/go-qcow2reader/image"
-	"github.com/lima-vm/go-qcow2reader/image/qcow2"
-	"github.com/lima-vm/go-qcow2reader/image/raw"
 )
 
 type NoopImagePuller struct {
@@ -36,17 +29,6 @@ func (puller *NoopImagePuller) SetSourceURI(sourcePath string) {
 	puller.sourceURI = sourcePath
 }
 
-func imageExtension(vmType define.VMType, sourceURI string) string {
-	switch vmType {
-	case define.AppleHvVirt:
-		return ".raw"
-	case define.WSLVirt:
-		return ".tar.gz"
-	default:
-		return filepath.Ext(sourceURI)
-	}
-}
-
 func (puller *NoopImagePuller) LocalPath() (*define.VMFile, error) {
 	// if localPath has already been calculated returns it
 	if puller.localPath != nil {
@@ -59,7 +41,12 @@ func (puller *NoopImagePuller) LocalPath() (*define.VMFile, error) {
 		return nil, err
 	}
 
-	vmFile, err := dirs.DataDir.AppendToNewVMFile(fmt.Sprintf("%s-%s%s", puller.machineName, puller.vmType.String(), imageExtension(puller.vmType, puller.sourceURI)), nil)
+	imageExt, err := imageExtension(puller.vmType, puller.sourceURI)
+	if err != nil {
+		return nil, err
+	}
+
+	vmFile, err := dirs.DataDir.AppendToNewVMFile(fmt.Sprintf("%s-%s%s", puller.machineName, puller.vmType.String(), imageExt), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -77,59 +64,26 @@ func (puller *NoopImagePuller) Download() error {
 	if err != nil {
 		return err
 	}
-	return doCopyFile(puller.sourceURI, localPath.Path, puller.vmType)
-}
 
-func doCopyFile(src, dest string, vmType define.VMType) error {
-	srcF, err := os.Open(src)
+	src, err := os.Open(puller.sourceURI)
 	if err != nil {
 		return err
 	}
-	defer srcF.Close()
+	defer src.Close()
 
+	return doCopyFile(src, localPath.Path)
+}
+
+func copyFile(src *os.File, dest string) error {
 	destF, err := os.Create(dest)
 	if err != nil {
 		return err
 	}
 	defer destF.Close()
 
-	if vmType == define.AppleHvVirt {
-		return copyFileMac(srcF, destF)
-	}
-	return copyFile(srcF, destF)
-}
-
-func copyFileMac(src, dest *os.File) error {
-	srcImg, err := qcow2reader.Open(src)
-	if err != nil {
-		return err
-	}
-	defer srcImg.Close()
-
-	switch srcImg.Type() {
-	case raw.Type:
-		// if the image is raw it performs a simple copy
-		return copyFile(src, dest)
-	case qcow2.Type:
-		// if the image is qcow2 it performs a conversion to raw
-		return convertToRaw(srcImg, dest)
-	default:
-		return fmt.Errorf("%s format not supported for conversion to raw", srcImg.Type())
-	}
-}
-
-func convertToRaw(srcImg image.Image, dest *os.File) error {
-	if err := srcImg.Readable(); err != nil {
-		return fmt.Errorf("source image is not readable: %w", err)
-	}
-
-	return convert.Convert(dest, srcImg, convert.Options{})
-}
-
-func copyFile(src, dst *os.File) error {
-	bufferedWriter := bufio.NewWriter(dst)
+	bufferedWriter := bufio.NewWriter(destF)
 	defer bufferedWriter.Flush()
 
-	_, err := io.Copy(bufferedWriter, src)
+	_, err = io.Copy(bufferedWriter, src)
 	return err
 }

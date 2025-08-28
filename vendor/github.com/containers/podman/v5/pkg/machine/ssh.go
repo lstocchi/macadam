@@ -13,32 +13,44 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// CommonSSH is a common function for ssh'ing to a podman machine using system-connections
+// LocalhostSSH is a common function for ssh'ing to a podman machine using system-connections
 // and a port
 // TODO This should probably be taught about an machineconfig to reduce input
-func CommonSSH(username, identityPath, name string, sshPort int, inputArgs []string) error {
-	return commonBuiltinSSH(username, identityPath, name, sshPort, inputArgs, true, os.Stdin)
+func LocalhostSSH(username, identityPath, name string, sshPort int, inputArgs []string) error {
+	return localhostBuiltinSSH(username, identityPath, name, "localhost", sshPort, inputArgs, true, os.Stdin)
 }
 
-func CommonSSHShell(username, identityPath, name string, sshPort int, inputArgs []string) error {
-	return commonNativeSSH(username, identityPath, name, sshPort, inputArgs, os.Stdin)
+// This ssh’es to a podman machine which is not listening on localhost but has its own IP
+func LocalhostSSHShellWithAddress(username, identityPath, name, address string, sshPort int, inputArgs []string) error {
+	if address == "" {
+		address = "localhost"
+	}
+	return localhostNativeSSH(username, identityPath, name, address, sshPort, inputArgs, os.Stdin)
 }
 
-func CommonSSHSilent(username, identityPath, name string, sshPort int, inputArgs []string) error {
-	return commonBuiltinSSH(username, identityPath, name, sshPort, inputArgs, false, nil)
+func LocalhostSSHShell(username, identityPath, name string, sshPort int, inputArgs []string) error {
+	return localhostNativeSSH(username, identityPath, name, "localhost", sshPort, inputArgs, os.Stdin)
 }
 
-func CommonSSHWithStdin(username, identityPath, name string, sshPort int, inputArgs []string, stdin io.Reader) error {
-	return commonBuiltinSSH(username, identityPath, name, sshPort, inputArgs, true, stdin)
+func LocalhostSSHSilent(username, identityPath, name string, sshPort int, inputArgs []string) error {
+	return localhostBuiltinSSH(username, identityPath, name, "localhost", sshPort, inputArgs, false, nil)
 }
 
-func commonBuiltinSSH(username, identityPath, name string, sshPort int, inputArgs []string, passOutput bool, stdin io.Reader) error {
-	config, err := createConfig(username, identityPath)
+func LocalhostSSHWithStdin(username, identityPath, name string, sshPort int, inputArgs []string, stdin io.Reader) error {
+	return localhostBuiltinSSH(username, identityPath, name, "localhost", sshPort, inputArgs, true, stdin)
+}
+
+func LocalhostSSHSilentWithAddress(username, identityPath, name, address string, sshPort int, inputArgs []string) error {
+	return localhostBuiltinSSH(username, identityPath, name, address, sshPort, inputArgs, false, nil)
+}
+
+func localhostBuiltinSSH(username, identityPath, name, address string, sshPort int, inputArgs []string, passOutput bool, stdin io.Reader) error {
+	config, err := createLocalhostConfig(username, identityPath) // WARNING: This MUST NOT be generalized to allow communication over untrusted networks.
 	if err != nil {
 		return err
 	}
 
-	client, err := ssh.Dial("tcp", fmt.Sprintf("localhost:%d", sshPort), config)
+	client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", address, sshPort), config)
 	if err != nil {
 		return err
 	}
@@ -91,7 +103,10 @@ func runSessionWithDebug(session *ssh.Session, cmd string) error {
 	return session.Wait()
 }
 
-func createConfig(user string, identityPath string) (*ssh.ClientConfig, error) {
+// createLocalhostConfig returns a *ssh.ClientConfig for authenticating a user using a private key
+//
+// WARNING: This MUST NOT be used to communicate over untrusted networks.
+func createLocalhostConfig(user string, identityPath string) (*ssh.ClientConfig, error) {
 	key, err := os.ReadFile(identityPath)
 	if err != nil {
 		return nil, err
@@ -103,23 +118,23 @@ func createConfig(user string, identityPath string) (*ssh.ClientConfig, error) {
 	}
 
 	return &ssh.ClientConfig{
-		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		// Not specifying ciphers / MACs seems to allow fairly weak ciphers. This config is restricted
+		// to connecting to localhost: where we rely on the kernel’s process isolation, not primarily on cryptography.
+		User: user,
+		Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		// This config is restricted to connecting to localhost (and to a VM we manage),
+		// we rely on the kernel’s process isolation, not on cryptography,
+		// This would be UNACCEPTABLE for most other uses.
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}, nil
 }
 
-func commonNativeSSH(username, identityPath, name string, sshPort int, inputArgs []string, stdin io.Reader) error {
-	sshDestination := username + "@localhost"
+func localhostNativeSSH(username, identityPath, name, address string, sshPort int, inputArgs []string, stdin io.Reader) error {
+	sshDestination := username + "@" + address
 	port := strconv.Itoa(sshPort)
 	interactive := true
 
-	args := []string{"-i", identityPath, "-p", port, sshDestination,
-		"-o", "IdentitiesOnly=yes",
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=" + os.DevNull,
-		"-o", "CheckHostIP=no",
-		"-o", "LogLevel=ERROR", "-o", "SetEnv=LC_ALL="}
+	args := append([]string{"-i", identityPath, "-p", port, sshDestination}, LocalhostSSHArgs()...) // WARNING: This MUST NOT be generalized to allow communication over untrusted networks.
 	if len(inputArgs) > 0 {
 		interactive = false
 		args = append(args, inputArgs...)
@@ -137,4 +152,20 @@ func commonNativeSSH(username, identityPath, name string, sshPort int, inputArgs
 	}
 
 	return cmd.Run()
+}
+
+// LocalhostSSHArgs returns OpenSSH command-line options for connecting with no host key identity checks.
+//
+// WARNING: This MUST NOT be used to communicate over untrusted networks.
+func LocalhostSSHArgs() []string {
+	// This config is restricted to connecting to localhost (and to a VM we manage),
+	// we rely on the kernel’s process isolation, not on cryptography,
+	// This would be UNACCEPTABLE for most other uses.
+	return []string{
+		"-o", "IdentitiesOnly=yes",
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=" + os.DevNull,
+		"-o", "CheckHostIP=no",
+		"-o", "LogLevel=ERROR",
+		"-o", "SetEnv=LC_ALL="}
 }

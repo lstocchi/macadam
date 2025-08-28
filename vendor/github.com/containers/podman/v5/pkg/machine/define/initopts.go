@@ -32,6 +32,7 @@ type InitOptions struct {
 	Volumes            []string
 	IsDefault          bool
 	Memory             uint64
+	Swap               uint64
 	Name               string
 	TimeZone           string
 	URI                url.URL
@@ -45,4 +46,5 @@ type InitOptions struct {
 	ImagePuller        ImagePuller
 	CloudInit          bool
 	Capabilities       *MachineCapabilities
+	CloudInitFiles     []string // user-data, meta-data and network-config cloud-init configuration file paths
 }
