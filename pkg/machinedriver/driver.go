@@ -470,9 +470,6 @@ func (d *Driver) RemoveWithOptions(opts machine.RemoveOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := shim.Stop(d.vmConfig, d.vmProvider, dirs, true); err != nil {
-		return err
-	}
 
 	if err := shim.Remove(d.vmConfig, d.vmProvider, dirs, opts); err != nil {
 		/* don’t print anything if the user cancelled the removal */
