@@ -46,6 +46,14 @@ func validateOptions(provider vmconfigs.VMProvider, userModeNetworking *bool) er
 	return nil
 }
 
+func GetBinaryPath(binaryName string) (*define.VMFile, error) {
+	binary, err := findBinary(binaryName)
+	if err != nil {
+		return nil, err
+	}
+	return define.NewMachineFile(binary, nil)
+}
+
 func checkBinaryArg(binaryName, arg string) error {
 	binary, err := findBinary(binaryName)
 	if err != nil {
