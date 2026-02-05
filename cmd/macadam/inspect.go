@@ -8,11 +8,13 @@ import (
 	"time"
 
 	"github.com/containers/podman/v5/cmd/podman/utils"
+	"github.com/containers/podman/v5/pkg/machine"
 	"github.com/containers/podman/v5/pkg/machine/define"
 	"github.com/containers/podman/v5/pkg/machine/env"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/crc-org/macadam/cmd/macadam/registry"
 	provider2 "github.com/crc-org/macadam/pkg/machinedriver/provider"
+	"github.com/crc-org/macadam/pkg/preflights"
 	"github.com/spf13/cobra"
 )
 
@@ -28,6 +30,18 @@ var (
 	}
 )
 
+type GVProxyInfo struct {
+	Binary        *define.VMFile `json:",omitempty"`
+	ServiceSocket *define.VMFile `json:",omitempty"`
+	Logs          *define.VMFile `json:",omitempty"`
+}
+
+// HostServicesInfo contains information about host-side services and processes
+// that support the VM, such as gvproxy
+type HostServicesInfo struct {
+	GVProxy *GVProxyInfo `json:",omitempty"`
+}
+
 // this is based on the struct of the same name in
 // github.com/containers/podman/v5/pkg/machine/config.go
 type InspectInfo struct {
@@ -39,6 +53,7 @@ type InspectInfo struct {
 	SSHConfig          vmconfigs.SSHConfig
 	State              define.Status
 	UserModeNetworking bool
+	Services           *HostServicesInfo `json:",omitempty"`
 }
 
 func init() {
@@ -76,6 +91,24 @@ func inspect(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
+		// Gather service information
+		// gvproxy is used when UserModeNetworkEnabled returns true
+		var servicesInfo *HostServicesInfo
+		if vmProvider.UserModeNetworkEnabled(mc) {
+			servicesInfo = &HostServicesInfo{
+				GVProxy: &GVProxyInfo{},
+			}
+			if binary, err := preflights.GetBinaryPath(machine.ForwarderBinaryName); err == nil {
+				servicesInfo.GVProxy.Binary = binary
+			}
+			if gvproxyServiceSocket, err := mc.GVProxyServiceSocket(); err == nil {
+				servicesInfo.GVProxy.ServiceSocket = gvproxyServiceSocket
+			}
+			if gvproxyLogFile, err := machine.GetGVProxyLogFile(mc, dirs); err == nil {
+				servicesInfo.GVProxy.Logs = gvproxyLogFile
+			}
+		}
+
 		ii := InspectInfo{
 			ConfigDir:          *dirs.ConfigDir,
 			Created:            mc.Created,
@@ -85,6 +118,7 @@ func inspect(cmd *cobra.Command, args []string) error {
 			SSHConfig:          mc.SSH,
 			State:              state,
 			UserModeNetworking: vmProvider.UserModeNetworkEnabled(mc),
+			Services:           servicesInfo,
 		}
 		if ii.LastUp.IsZero() {
 			ii.LastUp = nil
