@@ -32,6 +32,7 @@ func init() {
 		Command: startCmd,
 	})
 
+	// FIXME: these options are no-ops, a new StartOptions instance is created in pkg/machinedriver when starting the VM
 	flags := startCmd.Flags()
 	noInfoFlagName := "no-info"
 	flags.BoolVar(&startOpts.NoInfo, noInfoFlagName, false, "Suppress informational tips")
