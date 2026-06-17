@@ -11,12 +11,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/containers/common/pkg/resize"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/libpod/events"
-	"github.com/containers/storage/pkg/archive"
-	spec "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/resize"
+	"go.podman.io/storage/pkg/archive"
 	"golang.org/x/sys/unix"
 )
 
@@ -85,42 +85,31 @@ func (c *Container) initUnlocked(ctx context.Context, recursive bool) error {
 // Start requires that all dependency containers (e.g. pod infra containers) are
 // running before starting the container. The recursive parameter, if set, will start all
 // dependencies before starting this container.
-func (c *Container) Start(ctx context.Context, recursive bool) (finalErr error) {
-	if !c.batched {
-		c.lock.Lock()
-		defer c.lock.Unlock()
-
-		// defer's are executed LIFO so we are locked here
-		// as long as we call this after the defer unlock()
-		defer func() {
-			if finalErr != nil {
-				if err := saveContainerError(c, finalErr); err != nil {
-					logrus.Debug(err)
-				}
-			}
-		}()
-
-		if err := c.syncContainer(); err != nil {
-			return err
+func (c *Container) Start(ctx context.Context, recursive bool) error {
+	// Have to lock the pod the container is a part of.
+	// This prevents running `podman start` at the same time a
+	// `podman pod stop` is running, which could lead to weird races.
+	// Pod locks come before container locks, so do this first.
+	if c.config.Pod != "" {
+		// If we get an error, the pod was probably removed.
+		// So we get an expected ErrCtrRemoved instead of ErrPodRemoved,
+		// just ignore this and move on to syncing the container.
+		pod, _ := c.runtime.state.Pod(c.config.Pod)
+		if pod != nil {
+			pod.lock.Lock()
+			defer pod.lock.Unlock()
 		}
 	}
-	if err := c.prepareToStart(ctx, recursive); err != nil {
-		return err
-	}
 
-	// Start the container
-	if err := c.start(); err != nil {
-		return err
-	}
-	return c.waitForHealthy(ctx)
+	return c.startNoPodLock(ctx, recursive)
 }
 
 // Update updates the given container.
 // Either resource limits, restart policies, or HealthCheck configuration can be updated.
-// Either resources, restartPolicy or changedHealthCheckConfiguration must not be nil.
+// Either resources, restartPolicy or changedHealthCheckConfiguration must not be nil in the updateOptions.
 // If restartRetries is not nil, restartPolicy must be set and must be "on-failure".
 // Nil values of changedHealthCheckConfiguration are not updated.
-func (c *Container) Update(resources *spec.LinuxResources, restartPolicy *string, restartRetries *uint, changedHealthCheckConfiguration *define.UpdateHealthCheckConfig) error {
+func (c *Container) Update(updateOptions *entities.ContainerUpdateOptions) error {
 	if !c.batched {
 		c.lock.Lock()
 		defer c.lock.Unlock()
@@ -134,7 +123,7 @@ func (c *Container) Update(resources *spec.LinuxResources, restartPolicy *string
 		return fmt.Errorf("container %s is being removed, cannot update: %w", c.ID(), define.ErrCtrStateInvalid)
 	}
 
-	healthCheckConfig, changedHealthCheck, err := GetNewHealthCheckConfig(&HealthCheckConfig{Schema2HealthConfig: c.HealthCheckConfig()}, *changedHealthCheckConfiguration)
+	healthCheckConfig, changedHealthCheck, err := GetNewHealthCheckConfig(&HealthCheckConfig{Schema2HealthConfig: c.HealthCheckConfig()}, *updateOptions.ChangedHealthCheckConfiguration)
 	if err != nil {
 		return err
 	}
@@ -147,7 +136,7 @@ func (c *Container) Update(resources *spec.LinuxResources, restartPolicy *string
 		}
 	}
 
-	startupHealthCheckConfig, changedStartupHealthCheck, err := GetNewHealthCheckConfig(&StartupHealthCheckConfig{StartupHealthCheck: c.Config().StartupHealthCheckConfig}, *changedHealthCheckConfiguration)
+	startupHealthCheckConfig, changedStartupHealthCheck, err := GetNewHealthCheckConfig(&StartupHealthCheckConfig{StartupHealthCheck: c.Config().StartupHealthCheckConfig}, *updateOptions.ChangedHealthCheckConfiguration)
 	if err != nil {
 		return err
 	}
@@ -160,7 +149,7 @@ func (c *Container) Update(resources *spec.LinuxResources, restartPolicy *string
 		}
 	}
 
-	globalHealthCheckOptions, err := changedHealthCheckConfiguration.GetNewGlobalHealthCheck()
+	globalHealthCheckOptions, err := updateOptions.ChangedHealthCheckConfiguration.GetNewGlobalHealthCheck()
 	if err != nil {
 		return err
 	}
@@ -169,7 +158,7 @@ func (c *Container) Update(resources *spec.LinuxResources, restartPolicy *string
 	}
 
 	defer c.newContainerEvent(events.Update)
-	return c.update(resources, restartPolicy, restartRetries)
+	return c.update(updateOptions)
 }
 
 // Attach to a container.
@@ -294,6 +283,21 @@ func (c *Container) Stop() error {
 // manually. If timeout is 0, SIGKILL will be used immediately to kill the
 // container.
 func (c *Container) StopWithTimeout(timeout uint) (finalErr error) {
+	// Have to lock the pod the container is a part of.
+	// This prevents running `podman stop` at the same time a
+	// `podman pod start` is running, which could lead to weird races.
+	// Pod locks come before container locks, so do this first.
+	if c.config.Pod != "" {
+		// If we get an error, the pod was probably removed.
+		// So we get an expected ErrCtrRemoved instead of ErrPodRemoved,
+		// just ignore this and move on to syncing the container.
+		pod, _ := c.runtime.state.Pod(c.config.Pod)
+		if pod != nil {
+			pod.lock.Lock()
+			defer pod.lock.Unlock()
+		}
+	}
+
 	if !c.batched {
 		c.lock.Lock()
 		defer c.lock.Unlock()
@@ -771,6 +775,7 @@ func (c *Container) WaitForConditionWithInterval(ctx context.Context, waitTimeou
 							exitCode, err := c.runtime.state.GetContainerExitCode(c.ID())
 							if err == nil {
 								trySend(exitCode, nil)
+								return
 							}
 
 							trySend(-1, nil)
@@ -858,58 +863,7 @@ func (c *Container) Cleanup(ctx context.Context, onlyStopped bool) error {
 		}
 	}
 
-	// Check if state is good
-	if !c.ensureState(define.ContainerStateConfigured, define.ContainerStateCreated, define.ContainerStateStopped, define.ContainerStateStopping, define.ContainerStateExited) {
-		return fmt.Errorf("container %s is running or paused, refusing to clean up: %w", c.ID(), define.ErrCtrStateInvalid)
-	}
-	if onlyStopped && !c.ensureState(define.ContainerStateStopped) {
-		return fmt.Errorf("container %s is not stopped and only cleanup for a stopped container was requested: %w", c.ID(), define.ErrCtrStateInvalid)
-	}
-
-	// if the container was not created in the oci runtime or was already cleaned up, then do nothing
-	if c.ensureState(define.ContainerStateConfigured, define.ContainerStateExited) {
-		return nil
-	}
-
-	// Handle restart policy.
-	// Returns a bool indicating whether we actually restarted.
-	// If we did, don't proceed to cleanup - just exit.
-	didRestart, err := c.handleRestartPolicy(ctx)
-	if err != nil {
-		return err
-	}
-	if didRestart {
-		return nil
-	}
-
-	// If we didn't restart, we perform a normal cleanup
-
-	// make sure all the container processes are terminated if we are running without a pid namespace.
-	hasPidNs := false
-	if c.config.Spec.Linux != nil {
-		for _, i := range c.config.Spec.Linux.Namespaces {
-			if i.Type == spec.PIDNamespace {
-				hasPidNs = true
-				break
-			}
-		}
-	}
-	if !hasPidNs {
-		// do not fail on errors
-		_ = c.ociRuntime.KillContainer(c, uint(unix.SIGKILL), true)
-	}
-
-	// Check for running exec sessions
-	sessions, err := c.getActiveExecSessions()
-	if err != nil {
-		return err
-	}
-	if len(sessions) > 0 {
-		return fmt.Errorf("container %s has active exec sessions, refusing to clean up: %w", c.ID(), define.ErrCtrStateInvalid)
-	}
-
-	defer c.newContainerEvent(events.Cleanup)
-	return c.cleanup(ctx)
+	return c.fullCleanup(ctx, onlyStopped)
 }
 
 // Batch starts a batch operation on the given container
@@ -994,7 +948,7 @@ func (c *Container) ReloadNetwork() error {
 }
 
 // Refresh is DEPRECATED and REMOVED.
-func (c *Container) Refresh(ctx context.Context) error {
+func (c *Container) Refresh(_ context.Context) error {
 	// This has been deprecated for a long while, and is in the process of
 	// being removed.
 	return define.ErrNotImplemented
@@ -1011,6 +965,8 @@ type ContainerCheckpointOptions struct {
 	// TCPEstablished tells the API to checkpoint a container
 	// even if it contains established TCP connections
 	TCPEstablished bool
+	// TCPClose tells the API to close all TCP connections during restore
+	TCPClose bool
 	// TargetFile tells the API to read (or write) the checkpoint image
 	// from (or to) the filename set in TargetFile
 	TargetFile string
@@ -1124,7 +1080,7 @@ func (c *Container) Restore(ctx context.Context, options ContainerCheckpointOpti
 }
 
 // Indicate whether or not the container should restart
-func (c *Container) ShouldRestart(ctx context.Context) bool {
+func (c *Container) ShouldRestart(_ context.Context) bool {
 	logrus.Debugf("Checking if container %s should restart", c.ID())
 	if !c.batched {
 		c.lock.Lock()
@@ -1154,7 +1110,7 @@ func (c *Container) CopyFromArchive(_ context.Context, containerPath string, cho
 
 // CopyToArchive copies the contents from the specified path *inside* the
 // container to the tarStream.
-func (c *Container) CopyToArchive(ctx context.Context, containerPath string, tarStream io.Writer) (func() error, error) {
+func (c *Container) CopyToArchive(_ context.Context, containerPath string, tarStream io.Writer) (func() error, error) {
 	if !c.batched {
 		c.lock.Lock()
 		defer c.lock.Unlock()
@@ -1168,7 +1124,7 @@ func (c *Container) CopyToArchive(ctx context.Context, containerPath string, tar
 }
 
 // Stat the specified path *inside* the container and return a file info.
-func (c *Container) Stat(ctx context.Context, containerPath string) (*define.FileInfo, error) {
+func (c *Container) Stat(_ context.Context, containerPath string) (*define.FileInfo, error) {
 	if !c.batched {
 		c.lock.Lock()
 		defer c.lock.Unlock()

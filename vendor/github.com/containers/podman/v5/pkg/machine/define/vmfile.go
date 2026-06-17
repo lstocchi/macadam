@@ -99,7 +99,9 @@ func NewMachineFile(path string, symlink *string) (*VMFile, error) {
 		return nil, errors.New("invalid symlink path")
 	}
 	mf := VMFile{Path: path}
-	logrus.Debugf("socket length for %s is %d", path, len(path))
+	if len(path) > MaxSocketPathLength-10 {
+		logrus.Debugf("socket length for %s is %d", path, len(path))
+	}
 	if symlink != nil && len(path) > MaxSocketPathLength {
 		if err := mf.makeSymlink(symlink); err != nil && !errors.Is(err, os.ErrExist) {
 			return nil, err
@@ -117,7 +119,7 @@ func (m *VMFile) makeSymlink(symlink *string) error {
 	}
 	sl := filepath.Join(homeDir, ".podman", *symlink)
 	// make the symlink dir and throw away if it already exists
-	if err := os.MkdirAll(filepath.Dir(sl), 0700); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.MkdirAll(filepath.Dir(sl), 0o700); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	m.Symlink = &sl

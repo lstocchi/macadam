@@ -6,7 +6,7 @@ env:
     #### Global variables used for all tasks
     ####
     # Name of the ultimate destination branch for this CI run, PR or post-merge.
-    DEST_BRANCH: "release-1.39"
+    DEST_BRANCH: "main"
     GOPATH: "/var/tmp/go"
     GOSRC: "${GOPATH}/src/github.com/containers/buildah"
     GOCACHE: "/tmp/go-build"
@@ -22,20 +22,24 @@ env:
     IN_PODMAN: 'false'
     # root or rootless
     PRIV_NAME: root
+    # default "mention the $BUILDAH_RUNTIME in the task alias, with initial whitespace" value
+    RUNTIME_N: ""
 
     ####
     #### Cache-image names to test with
     ####
     # GCE project where images live
     IMAGE_PROJECT: "libpod-218412"
-    FEDORA_NAME: "fedora-41"
-    PRIOR_FEDORA_NAME: "fedora-40"
+    FEDORA_NAME: "fedora-42"
+    PRIOR_FEDORA_NAME: "fedora-41"
+    RAWHIDE_NAME: "rawhide"
     DEBIAN_NAME: "debian-13"
 
     # Image identifiers
-    IMAGE_SUFFIX: "c20250107t132430z-f41f40d13"
+    IMAGE_SUFFIX: "c20250910t092246z-f42f41d13"
     FEDORA_CACHE_IMAGE_NAME: "fedora-${IMAGE_SUFFIX}"
     PRIOR_FEDORA_CACHE_IMAGE_NAME: "prior-fedora-${IMAGE_SUFFIX}"
+    RAWHIDE_CACHE_IMAGE_NAME: "rawhide-${IMAGE_SUFFIX}" # Used temporarily for rust-podman-sequoia. After that RPM is available in stable Fedora releases, we can stop testing against Rawhide again.
     DEBIAN_CACHE_IMAGE_NAME: "debian-${IMAGE_SUFFIX}"
 
     IN_PODMAN_IMAGE: "quay.io/libpod/fedora_podman:${IMAGE_SUFFIX}"
@@ -50,7 +54,7 @@ env:
 gcp_credentials: ENCRYPTED[ae0bf7370f0b6e446bc61d0865a2c55d3e166b3fab9466eb0393e38e1c66a31ca4c71ddc7e0139d47d075c36dd6d3fd7]
 
 # Default timeout for each task
-timeout_in: 120m
+timeout_in: 30m
 
 # Default VM to use unless set or modified by task
 gce_instance: &standardvm
@@ -77,6 +81,7 @@ meta_task:
         IMGNAMES: |-
             ${FEDORA_CACHE_IMAGE_NAME}
             ${PRIOR_FEDORA_CACHE_IMAGE_NAME}
+            ${RAWHIDE_CACHE_IMAGE_NAME}
             ${DEBIAN_CACHE_IMAGE_NAME}
             build-push-${IMAGE_SUFFIX}
         BUILDID: "${CIRRUS_BUILD_ID}"
@@ -95,12 +100,12 @@ smoke_task:
 
     gce_instance:
         memory: "12G"
-        cpu: 4
+        cpu: 8
 
     # Don't bother running on branches (including cron), or for tags.
     skip: $CIRRUS_PR == ''
 
-    timeout_in: 30m
+    timeout_in: 10m
 
     setup_script: '${SCRIPT_BASE}/setup.sh |& ${_TIMESTAMP}'
     build_script: '${SCRIPT_BASE}/build.sh |& ${_TIMESTAMP}'
@@ -122,7 +127,7 @@ vendor_task:
 
     # Runs within Cirrus's "community cluster"
     container:
-        image: docker.io/library/golang:1.22
+        image: docker.io/library/golang:1.24.2
         cpu: 1
         memory: 1
 
@@ -154,6 +159,8 @@ cross_build_task:
 
 unit_task:
     name: 'Unit tests w/ $STORAGE_DRIVER'
+    gce_instance:
+      cpu: 4
     alias: unit
     skip: &not_build_docs >-
         $CIRRUS_CHANGE_TITLE =~ '.*CI:DOCS.*' ||
@@ -161,8 +168,6 @@ unit_task:
     depends_on: &smoke_vendor
       - smoke
       - vendor
-
-    timeout_in: 90m
 
     matrix:
         - env:
@@ -181,9 +186,8 @@ conformance_task:
     depends_on: *smoke_vendor
 
     gce_instance:
+        cpu: 4
         image_name: "${DEBIAN_CACHE_IMAGE_NAME}"
-
-    timeout_in: 65m
 
     matrix:
         - env:
@@ -197,7 +201,7 @@ conformance_task:
 
 
 integration_task:
-    name: "Integration $DISTRO_NV w/ $STORAGE_DRIVER"
+    name: "Integration $DISTRO_NV$RUNTIME_N w/ $STORAGE_DRIVER"
     alias: integration
     skip: *not_build_docs
     depends_on: *smoke_vendor
@@ -208,11 +212,14 @@ integration_task:
             DISTRO_NV: "${FEDORA_NAME}"
             IMAGE_NAME: "${FEDORA_CACHE_IMAGE_NAME}"
             STORAGE_DRIVER: 'vfs'
-        # Disabled until we update to f40/41 as f39 does not have go 1.22
-        # - env:
-        #     DISTRO_NV: "${PRIOR_FEDORA_NAME}"
-        #     IMAGE_NAME: "${PRIOR_FEDORA_CACHE_IMAGE_NAME}"
-        #     STORAGE_DRIVER: 'vfs'
+            BUILDAH_RUNTIME: crun
+            RUNTIME_N: " using crun"
+        - env:
+            DISTRO_NV: "${PRIOR_FEDORA_NAME}"
+            IMAGE_NAME: "${PRIOR_FEDORA_CACHE_IMAGE_NAME}"
+            STORAGE_DRIVER: 'vfs'
+            BUILDAH_RUNTIME: crun
+            RUNTIME_N: " using crun"
         - env:
             DISTRO_NV: "${DEBIAN_NAME}"
             IMAGE_NAME: "${DEBIAN_CACHE_IMAGE_NAME}"
@@ -222,19 +229,28 @@ integration_task:
             DISTRO_NV: "${FEDORA_NAME}"
             IMAGE_NAME: "${FEDORA_CACHE_IMAGE_NAME}"
             STORAGE_DRIVER: 'overlay'
-        # Disabled until we update to f40/41 as f39 does not have go 1.22
-        # - env:
-        #     DISTRO_NV: "${PRIOR_FEDORA_NAME}"
-        #     IMAGE_NAME: "${PRIOR_FEDORA_CACHE_IMAGE_NAME}"
-        #     STORAGE_DRIVER: 'overlay'
+            BUILDAH_RUNTIME: crun
+            RUNTIME_N: " using crun"
+        - env:
+            DISTRO_NV: "${PRIOR_FEDORA_NAME}"
+            IMAGE_NAME: "${PRIOR_FEDORA_CACHE_IMAGE_NAME}"
+            STORAGE_DRIVER: 'overlay'
+            BUILDAH_RUNTIME: crun
+            RUNTIME_N: " using crun"
         - env:
             DISTRO_NV: "${DEBIAN_NAME}"
             IMAGE_NAME: "${DEBIAN_CACHE_IMAGE_NAME}"
             STORAGE_DRIVER: 'overlay'
+        - env:
+            DISTRO_NV: "${RAWHIDE_NAME}"
+            IMAGE_NAME: "${RAWHIDE_CACHE_IMAGE_NAME}"
+            STORAGE_DRIVER: 'overlay'
+            TEST_BUILD_TAGS: 'containers_image_sequoia'
 
-    gce_instance:
+    gce_instance: &integration_gce_instance
         image_name: "$IMAGE_NAME"
-        cpu: 4
+        cpu: 8
+        memory: "8G"
 
     # Separate scripts for separate outputs, makes debugging easier.
     setup_script: '${SCRIPT_BASE}/setup.sh |& ${_TIMESTAMP}'
@@ -254,8 +270,55 @@ integration_task:
         package_versions_script: '$GOSRC/$SCRIPT_BASE/logcollector.sh packages'
         golang_version_script: '$GOSRC/$SCRIPT_BASE/logcollector.sh golang'
 
+non_blocking_integration_task:
+    name: "Integration $DISTRO_NV$RUNTIME_N w/ $STORAGE_DRIVER (non-blocking)"
+    alias: non_blocking_integration
+    skip: *not_build_docs
+    depends_on: *smoke_vendor
+
+    matrix:
+        # VFS
+        - env:
+            DISTRO_NV: "${FEDORA_NAME}"
+            IMAGE_NAME: "${FEDORA_CACHE_IMAGE_NAME}"
+            STORAGE_DRIVER: 'vfs'
+            BUILDAH_RUNTIME: runc
+            RUNTIME_N: " using runc"
+        - env:
+            DISTRO_NV: "${PRIOR_FEDORA_NAME}"
+            IMAGE_NAME: "${PRIOR_FEDORA_CACHE_IMAGE_NAME}"
+            STORAGE_DRIVER: 'vfs'
+            BUILDAH_RUNTIME: runc
+            RUNTIME_N: " using runc"
+        # OVERLAY
+        - env:
+            DISTRO_NV: "${FEDORA_NAME}"
+            IMAGE_NAME: "${FEDORA_CACHE_IMAGE_NAME}"
+            STORAGE_DRIVER: 'overlay'
+            BUILDAH_RUNTIME: runc
+            RUNTIME_N: " using runc"
+        - env:
+            DISTRO_NV: "${PRIOR_FEDORA_NAME}"
+            IMAGE_NAME: "${PRIOR_FEDORA_CACHE_IMAGE_NAME}"
+            STORAGE_DRIVER: 'overlay'
+            BUILDAH_RUNTIME: runc
+            RUNTIME_N: " using runc"
+
+    gce_instance:
+        <<: *integration_gce_instance
+
+    # Separate scripts for separate outputs, makes debugging easier.
+    setup_script: '${SCRIPT_BASE}/setup.sh |& ${_TIMESTAMP}'
+    build_script: '${SCRIPT_BASE}/build.sh |& ${_TIMESTAMP}'
+    integration_test_script: '${SCRIPT_BASE}/test.sh integration |& ${_TIMESTAMP}'
+
+    binary_artifacts:
+        path: ./bin/*
+
+    always: *standardlogs
+
 integration_rootless_task:
-    name: "Integration rootless $DISTRO_NV w/ $STORAGE_DRIVER"
+    name: "Integration rootless $DISTRO_NV$RUNTIME_N w/ $STORAGE_DRIVER"
     alias: integration_rootless
     skip: *not_build_docs
     depends_on: *smoke_vendor
@@ -268,12 +331,15 @@ integration_rootless_task:
             IMAGE_NAME: "${FEDORA_CACHE_IMAGE_NAME}"
             STORAGE_DRIVER: 'overlay'
             PRIV_NAME: rootless
-        # Disabled until we update to f40/41 as f39 does not have go 1.22
-        # - env:
-        #     DISTRO_NV: "${PRIOR_FEDORA_NAME}"
-        #     IMAGE_NAME: "${PRIOR_FEDORA_CACHE_IMAGE_NAME}"
-        #     STORAGE_DRIVER: 'overlay'
-        #     PRIV_NAME: rootless
+            BUILDAH_RUNTIME: crun
+            RUNTIME_N: " using crun"
+        - env:
+            DISTRO_NV: "${PRIOR_FEDORA_NAME}"
+            IMAGE_NAME: "${PRIOR_FEDORA_CACHE_IMAGE_NAME}"
+            STORAGE_DRIVER: 'overlay'
+            PRIV_NAME: rootless
+            BUILDAH_RUNTIME: crun
+            RUNTIME_N: " using crun"
         - env:
             DISTRO_NV: "${DEBIAN_NAME}"
             IMAGE_NAME: "${DEBIAN_CACHE_IMAGE_NAME}"
@@ -281,8 +347,43 @@ integration_rootless_task:
             PRIV_NAME: rootless
 
     gce_instance:
-        image_name: "$IMAGE_NAME"
-        cpu: 4
+        <<: *integration_gce_instance
+
+    # Separate scripts for separate outputs, makes debugging easier.
+    setup_script: '${SCRIPT_BASE}/setup.sh |& ${_TIMESTAMP}'
+    build_script: '${SCRIPT_BASE}/build.sh |& ${_TIMESTAMP}'
+    integration_test_script: '${SCRIPT_BASE}/test.sh integration |& ${_TIMESTAMP}'
+
+    binary_artifacts:
+        path: ./bin/*
+
+    always:
+        <<: *standardlogs
+
+non_blocking_integration_rootless_task:
+    name: "Integration rootless $DISTRO_NV$RUNTIME_N w/ $STORAGE_DRIVER (non-blocking)"
+    alias: non_blocking_integration_rootless
+    skip: *not_build_docs
+    depends_on: *smoke_vendor
+
+    matrix:
+        - env:
+            DISTRO_NV: "${FEDORA_NAME}"
+            IMAGE_NAME: "${FEDORA_CACHE_IMAGE_NAME}"
+            STORAGE_DRIVER: 'overlay'
+            PRIV_NAME: rootless
+            BUILDAH_RUNTIME: runc
+            RUNTIME_N: " using runc"
+        - env:
+            DISTRO_NV: "${PRIOR_FEDORA_NAME}"
+            IMAGE_NAME: "${PRIOR_FEDORA_CACHE_IMAGE_NAME}"
+            STORAGE_DRIVER: 'overlay'
+            PRIV_NAME: rootless
+            BUILDAH_RUNTIME: runc
+            RUNTIME_N: " using runc"
+
+    gce_instance:
+        <<: *integration_gce_instance
 
     # Separate scripts for separate outputs, makes debugging easier.
     setup_script: '${SCRIPT_BASE}/setup.sh |& ${_TIMESTAMP}'
@@ -302,7 +403,8 @@ in_podman_task:
     depends_on: *smoke_vendor
 
     gce_instance:
-        cpu: 4
+        cpu: 8
+        memory: "8G"
 
     env:
         # This is key, cause the scripts to re-execute themselves inside a container.
@@ -339,6 +441,7 @@ success_task:
       - vendor
       - cross_build
       - integration
+      - integration_rootless
       - in_podman
 
     container:

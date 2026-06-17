@@ -4,17 +4,18 @@ package libpod
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
 	"os/exec"
 	"strings"
 
-	systemdCommon "github.com/containers/common/pkg/systemd"
 	"github.com/containers/podman/v5/pkg/errorhandling"
 	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/containers/podman/v5/pkg/systemd"
 	"github.com/sirupsen/logrus"
+	systemdCommon "go.podman.io/common/pkg/systemd"
 )
 
 // createTimer systemd timers for healthchecks of a container
@@ -55,7 +56,11 @@ func (c *Container) createTimer(interval string, isStartup bool) error {
 	logrus.Debugf("creating systemd-transient files: %s %s", "systemd-run", cmd)
 	systemdRun := exec.Command("systemd-run", cmd...)
 	if output, err := systemdRun.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s", output)
+		exitError := &exec.ExitError{}
+		if errors.As(err, &exitError) {
+			return fmt.Errorf("systemd-run failed: %w: output: %s", err, strings.TrimSpace(string(output)))
+		}
+		return fmt.Errorf("failed to execute systemd-run: %w", err)
 	}
 
 	c.state.HCUnitName = hcUnitName

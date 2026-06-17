@@ -6,17 +6,23 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 
-	"github.com/containers/common/pkg/completion"
 	ldefine "github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/machine/define"
-	provider2 "github.com/containers/podman/v5/pkg/machine/provider"
+	"github.com/containers/podman/v5/pkg/machine/env"
+	providerPodman "github.com/containers/podman/v5/pkg/machine/provider"
 	"github.com/containers/podman/v5/pkg/machine/shim"
+	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/crc-org/macadam/cmd/macadam/registry"
 	"github.com/crc-org/macadam/pkg/imagepullers"
 	macadam "github.com/crc-org/macadam/pkg/machinedriver"
+	provider2 "github.com/crc-org/macadam/pkg/machinedriver/provider"
 	"github.com/crc-org/macadam/pkg/preflights"
+	"github.com/docker/go-units"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/strongunits"
 )
 
 var (
@@ -30,8 +36,8 @@ var (
 		ValidArgsFunction: completion.AutocompleteNone,
 	}
 
-	initOptsFromFlags = define.InitOptions{}
-	// initOptionalFlags  = InitOptionalFlags{}
+	initOptsFromFlags  = define.InitOptions{}
+	initOptionalFlags  = InitOptionalFlags{}
 	defaultMachineName = "macadam"
 	// now                bool
 )
@@ -76,6 +82,21 @@ func init() {
 	flags.Uint64VarP(&initOptsFromFlags.Memory, memoryFlagName, "m", 4096, "Memory in MiB")
 	_ = initCmd.RegisterFlagCompletionFunc(memoryFlagName, completion.AutocompleteNone)
 
+	CloudInitPathFlagName := "cloud-init"
+	flags.StringSliceVarP(&initOptsFromFlags.CloudInitPaths, CloudInitPathFlagName, "", []string{}, "Path to user-data, meta-data and network-config cloud-init configuration files")
+	_ = initCmd.RegisterFlagCompletionFunc(CloudInitPathFlagName, completion.AutocompleteDefault)
+
+	// User-mode networking flag is only available on Windows (HyperV-only)
+	if runtime.GOOS == "windows" {
+		userModeNetFlagName := "user-mode-networking"
+		flags.BoolVar(&initOptionalFlags.UserModeNetworking, userModeNetFlagName, false,
+			"Whether this machine should use user-mode networking, routing traffic through a host user-space process (Hyperv-only, requires --provider=hyperv)")
+	}
+
+	VolumeFlagName := "volume"
+	flags.StringArrayVarP(&initOptsFromFlags.Volumes, VolumeFlagName, "v", []string{}, "Volumes to mount, source:target")
+	_ = initCmd.RegisterFlagCompletionFunc(VolumeFlagName, completion.AutocompleteDefault)
+
 	/* flags := initCmd.Flags()
 	cfg := registry.PodmanConfig()
 
@@ -115,10 +136,6 @@ func init() {
 		logrus.Error("unable to mark image-path flag deprecated")
 	}
 
-	VolumeFlagName := "volume"
-	flags.StringArrayVarP(&initOpts.Volumes, VolumeFlagName, "v", cfg.ContainersConfDefaultsRO.Machine.Volumes.Get(), "Volumes to mount, source:target")
-	_ = initCmd.RegisterFlagCompletionFunc(VolumeFlagName, completion.AutocompleteDefault)
-
 	USBFlagName := "usb"
 	flags.StringArrayVarP(&initOpts.USBs, USBFlagName, "", []string{},
 		"USB Host passthrough: bus=$1,devnum=$2 or vendor=$1,product=$2")
@@ -136,30 +153,43 @@ func init() {
 	_ = initCmd.RegisterFlagCompletionFunc(IgnitionPathFlagName, completion.AutocompleteDefault)
 
 	rootfulFlagName := "rootful"
-	flags.BoolVar(&initOpts.Rootful, rootfulFlagName, false, "Whether this machine should prefer rootful container execution")
+	flags.BoolVar(&initOpts.Rootful, rootfulFlagName, false, "Whether this machine should prefer rootful container execution") */
+}
 
-	userModeNetFlagName := "user-mode-networking"
-	flags.BoolVar(&initOptionalFlags.UserModeNetworking, userModeNetFlagName, false,
-		"Whether this machine should use user-mode networking, routing traffic through a host user-space process") */
+// cleanupOrphanedFiles cleans up orphaned files for a given machine
+func cleanupOrphanedFiles(vmProvider vmconfigs.VMProvider, name string) {
+	dirs, err := env.GetMachineDirs(vmProvider.VMType())
+	if err != nil {
+		return
+	}
+
+	mc, err := vmconfigs.LoadMachineByName(name, dirs)
+	if err != nil {
+		return
+	}
+
+	machines, err := providerPodman.GetAllMachinesAndRootfulness()
+	if err != nil {
+		return
+	}
+
+	rmFiles, genericRm, err := mc.Remove(machines, false, false)
+	if err != nil {
+		slog.Debug(fmt.Sprintf("failed to remove machines files of a previous machine having the same name %q. Error: %v", name, err))
+	}
+
+	if len(rmFiles) > 0 {
+		if err := genericRm(); err != nil {
+			slog.Warn(fmt.Sprintf("found orphaned file of a previous machine having the same name %q. Tried to clean the environment but failed to remove old machines files. %v", name, err))
+		}
+	}
 }
 
 func initMachine(cmd *cobra.Command, args []string) error {
-	if err := preflights.RunPreflights(); err != nil {
-		slog.Error(err.Error())
-		os.Exit(1)
-	}
-
-	provider, err := provider2.Get()
+	vmProvider, err := provider2.GetProviderOrDefault(provider)
 	if err != nil {
 		return err
 	}
-
-	/*
-		dirs, err := env.GetMachineDirs(provider.VMType())
-		if err != nil {
-			return err
-		}
-	*/
 
 	diskImage := ""
 	if len(args) > 0 {
@@ -175,9 +205,49 @@ func initMachine(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid name %q: %w", machineName, ldefine.RegexError)
 	}
 
-	puller := imagepullers.NewNoopImagePuller(machineName, provider.VMType())
+	mc, _, err := shim.VMExists(machineName, []vmconfigs.VMProvider{vmProvider})
+	if err != nil {
+		return err
+	}
+	if mc != nil {
+		// VM exists, return error
+		return fmt.Errorf("VM %s already exists", machineName)
+	}
+
+	// VM doesn't exist, check if there are orphaned files to clean up
+	// it may happen that a machine has been deleted externally (e.g. through the Hyper-v Manager)
+	// and podman was not aware of it. If the user wants to create a new machine with the same name,
+	// we should clean up the orphaned files.
+	cleanupOrphanedFiles(vmProvider, machineName)
 
 	initOpts := macadam.DefaultInitOpts(machineName)
+	if cmd.Flags().Changed("user-mode-networking") {
+		initOpts.UserModeNetworking = &initOptionalFlags.UserModeNetworking
+	}
+
+	if err := preflights.RunPreflights(vmProvider, initOpts.UserModeNetworking); err != nil {
+		slog.Error(err.Error())
+		os.Exit(1)
+	}
+
+	// Check if the disk image exists and is not larger than the specified disk size
+	if diskImage == "" {
+		return fmt.Errorf("disk image is required")
+	}
+
+	fileInfo, err := os.Stat(diskImage)
+	if err != nil {
+		return fmt.Errorf("failed to stat disk image %q: %w", diskImage, err)
+	}
+
+	diskSizeInBytes := int64(strongunits.GiB(initOptsFromFlags.DiskSize).ToBytes())
+	if fileInfo.Size() > diskSizeInBytes {
+		return fmt.Errorf("disk image %s (size: %s) is larger than the expected maximum size of %s",
+			diskImage, units.HumanSize(float64(fileInfo.Size())), units.HumanSize(float64(diskSizeInBytes)))
+	}
+
+	puller := imagepullers.NewNoopImagePuller(machineName, vmProvider.VMType())
+
 	initOpts.ImagePuller = puller
 	initOpts.ImagePuller.SetSourceURI(diskImage)
 	initOpts.Name = machineName
@@ -187,16 +257,19 @@ func initMachine(cmd *cobra.Command, args []string) error {
 	initOpts.Memory = initOptsFromFlags.Memory
 	initOpts.SSHIdentityPath = initOptsFromFlags.SSHIdentityPath
 	initOpts.Username = initOptsFromFlags.Username
+	initOpts.Volumes = initOptsFromFlags.Volumes
 	initOpts.CloudInit = true // this should be calculated based on the image we want to start ??
+	initOpts.CloudInitPaths = initOptsFromFlags.CloudInitPaths
 	initOpts.Capabilities = &define.MachineCapabilities{
 		HasReadyUnit:   false,
 		ForwardSockets: false,
 	}
+
 	/*
 		_, _, err = shim.VMExists(machineName, []vmconfigs.VMProvider{provider})
 		if err == nil {
 			return fmt.Errorf("machine %q already exists", machineName)
 		}
 	*/
-	return shim.Init(*initOpts, provider)
+	return shim.Init(*initOpts, vmProvider)
 }

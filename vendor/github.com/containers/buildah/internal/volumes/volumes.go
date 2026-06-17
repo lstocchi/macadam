@@ -19,17 +19,17 @@ import (
 	internalUtil "github.com/containers/buildah/internal/util"
 	"github.com/containers/buildah/pkg/overlay"
 	"github.com/containers/buildah/util"
-	"github.com/containers/common/pkg/parse"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/storage"
-	"github.com/containers/storage/pkg/idtools"
-	"github.com/containers/storage/pkg/lockfile"
-	"github.com/containers/storage/pkg/mount"
-	"github.com/containers/storage/pkg/unshare"
 	digest "github.com/opencontainers/go-digest"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	selinux "github.com/opencontainers/selinux/go-selinux"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/parse"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/storage"
+	"go.podman.io/storage/pkg/idtools"
+	"go.podman.io/storage/pkg/lockfile"
+	"go.podman.io/storage/pkg/mount"
+	"go.podman.io/storage/pkg/unshare"
 )
 
 const (
@@ -557,14 +557,19 @@ func GetCacheMount(sys *types.SystemContext, args []string, store storage.Store,
 			return newMount, "", "", "", nil, fmt.Errorf("unable to create build cache directory: %w", err)
 		}
 
+		ownerInfo := fmt.Sprintf(":%d:%d", uid, gid)
 		if id != "" {
-			// Don't let the user control where we place the directory.
-			dirID := digest.FromString(id).Encoded()[:16]
+			// Don't let the user try to inject pathname components by directly using
+			// the ID when constructing the cache directory location; distinguish
+			// between caches by ID and ownership
+			dirID := digest.FromString(id + ownerInfo).Encoded()[:16]
 			thisCacheRoot = filepath.Join(cacheParent, dirID)
 			buildahLockFilesDir = filepath.Join(cacheParent, BuildahCacheLockfileDir, dirID)
 		} else {
-			// Don't let the user control where we place the directory.
-			dirID := digest.FromString(newMount.Destination).Encoded()[:16]
+			// Don't let the user try to inject pathname components by directly using
+			// the target path when constructing the cache directory location;
+			// distinguish between caches by mount target location and ownership
+			dirID := digest.FromString(newMount.Destination + ownerInfo).Encoded()[:16]
 			thisCacheRoot = filepath.Join(cacheParent, dirID)
 			buildahLockFilesDir = filepath.Join(cacheParent, BuildahCacheLockfileDir, dirID)
 		}

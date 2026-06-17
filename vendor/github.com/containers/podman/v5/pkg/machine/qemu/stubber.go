@@ -13,8 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/strongunits"
 	gvproxy "github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/containers/podman/v5/pkg/machine"
 	"github.com/containers/podman/v5/pkg/machine/cloudinit"
@@ -24,6 +22,8 @@ import (
 	"github.com/containers/podman/v5/pkg/machine/sockets"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/strongunits"
 )
 
 type QEMUStubber struct {
@@ -38,22 +38,27 @@ type QEMUStubber struct {
 var (
 	gvProxyWaitBackoff        = 500 * time.Millisecond
 	gvProxyMaxBackoffAttempts = 6
+	exclusiveActive           = true
 )
 
 func (q *QEMUStubber) UserModeNetworkEnabled(*vmconfigs.MachineConfig) bool {
 	return true
 }
 
-func (q *QEMUStubber) UseProviderNetworkSetup() bool {
+func (q *QEMUStubber) UseProviderNetworkSetup(_ *vmconfigs.MachineConfig) bool {
 	return false
 }
 
+func (q *QEMUStubber) SetExclusiveActive(exclusive bool) {
+	exclusiveActive = exclusive
+}
+
 func (q *QEMUStubber) RequireExclusiveActive() bool {
-	return true
+	return exclusiveActive
 }
 
 func (q *QEMUStubber) setQEMUCommandLine(mc *vmconfigs.MachineConfig) error {
-	qemuBinary, err := findQEMUBinary()
+	qemuBinary, err := FindQEMUBinary()
 	if err != nil {
 		return err
 	}
@@ -71,7 +76,7 @@ func (q *QEMUStubber) setQEMUCommandLine(mc *vmconfigs.MachineConfig) error {
 		if err != nil {
 			return err
 		}
-		q.Command.SetBootableImage(cloudInitISO)
+		q.Command.SetISOImage(cloudInitISO.GetPath())
 	} else {
 		ignitionFile, err := mc.IgnitionFile()
 		if err != nil {
@@ -93,15 +98,16 @@ func (q *QEMUStubber) setQEMUCommandLine(mc *vmconfigs.MachineConfig) error {
 		if err != nil {
 			return err
 		}
-		q.Command.SetSerialPort(*readySocket, *mc.QEMUHypervisor.QEMUPidPath, mc.Name)
+		q.Command.SetSerialPort(*readySocket, mc.Name)
 	}
 
+	q.Command.SetPidFile(*mc.QEMUHypervisor.QEMUPidPath)
 	q.Command.SetUSBHostPassthrough(mc.Resources.USBs)
 
 	return nil
 }
 
-func (q *QEMUStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.MachineConfig, builder *ignition.IgnitionBuilder) error {
+func (q *QEMUStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.MachineConfig, _ *ignition.IgnitionBuilder) error {
 	monitor, err := command.NewQMPMonitor(opts.Name, opts.Dirs.RuntimeDir)
 	if err != nil {
 		return err
@@ -130,11 +136,7 @@ func runStartVMCommand(cmd *exec.Cmd) error {
 	if err != nil {
 		// check if qemu was not found
 		// look up qemu again maybe the path was changed, https://github.com/containers/podman/issues/13394
-		cfg, err := config.Default()
-		if err != nil {
-			return err
-		}
-		qemuBinaryPath, err := cfg.FindHelperBinary(QemuCommand, true)
+		qemuBinaryPath, err := FindQEMUBinary()
 		if err != nil {
 			return err
 		}
@@ -194,10 +196,12 @@ func (q *QEMUStubber) StartVM(mc *vmconfigs.MachineConfig) (func() error, func()
 	cmdLine := q.Command
 
 	// Disable graphic window when not in debug mode
-	// Done in start, so we're not suck with the debug level we used on init
+	// Done in start, so we're not stuck with the debug level we used on init
 	if !logrus.IsLevelEnabled(logrus.DebugLevel) {
 		cmdLine.SetDisplay("none")
 	}
+
+	logrus.Debugf("qemu cmd: %v", cmdLine)
 
 	stderrBuf := &bytes.Buffer{}
 
@@ -256,8 +260,8 @@ func waitForReady(readySocket *define.VMFile, pid int, stdErrBuffer *bytes.Buffe
 	return err
 }
 
-func (q *QEMUStubber) Exists(name string) (bool, error) {
-	return false, nil
+func (q *QEMUStubber) Exists(_ string) (*bool, error) {
+	return nil, nil
 }
 
 func (q *QEMUStubber) VMType() define.VMType {
@@ -362,11 +366,11 @@ func (q *QEMUStubber) MountVolumesToVM(mc *vmconfigs.MachineConfig, quiet bool) 
 		if !strings.HasPrefix(mount.Target, "/home") && !strings.HasPrefix(mount.Target, "/mnt") {
 			args = append(args, "sudo", "chattr", "-i", "/", ";")
 		}
-		args = append(args, "sudo", "mkdir", "-p", mount.Target)
+		args = append(args, "sudo", "mkdir", "-p", strconv.Quote(mount.Target))
 		if !strings.HasPrefix(mount.Target, "/home") && !strings.HasPrefix(mount.Target, "/mnt") {
 			args = append(args, ";", "sudo", "chattr", "+i", "/", ";")
 		}
-		err := machine.CommonSSH(mc.SSH.RemoteUsername, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, args)
+		err := machine.LocalhostSSH(mc.SSH.RemoteUsername, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, args)
 		if err != nil {
 			return err
 		}
@@ -375,13 +379,13 @@ func (q *QEMUStubber) MountVolumesToVM(mc *vmconfigs.MachineConfig, quiet bool) 
 		// in other words we don't want to make people unnecessarily reprovision their machines
 		// to upgrade from 9p to virtiofs.
 		mountOptions := []string{"-t", "virtiofs"}
-		mountOptions = append(mountOptions, []string{mount.Tag, mount.Target}...)
+		mountOptions = append(mountOptions, []string{mount.Tag, strconv.Quote(mount.Target)}...)
 		mountFlags := fmt.Sprintf("context=\"%s\"", machine.NFSSELinuxContext)
 		if mount.ReadOnly {
 			mountFlags += ",ro"
 		}
 		mountOptions = append(mountOptions, "-o", mountFlags)
-		err = machine.CommonSSH(mc.SSH.RemoteUsername, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, append([]string{"sudo", "mount"}, mountOptions...))
+		err = machine.LocalhostSSH(mc.SSH.RemoteUsername, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, append([]string{"sudo", "mount"}, mountOptions...))
 		if err != nil {
 			return err
 		}
@@ -393,15 +397,15 @@ func (q *QEMUStubber) MountType() vmconfigs.VolumeMountType {
 	return vmconfigs.VirtIOFS
 }
 
-func (q *QEMUStubber) PostStartNetworking(mc *vmconfigs.MachineConfig, noInfo bool) error {
+func (q *QEMUStubber) PostStartNetworking(_ *vmconfigs.MachineConfig, _ bool) error {
 	return nil
 }
 
-func (q *QEMUStubber) UpdateSSHPort(mc *vmconfigs.MachineConfig, port int) error {
+func (q *QEMUStubber) UpdateSSHPort(_ *vmconfigs.MachineConfig, _ int) error {
 	// managed by gvproxy on this backend, so nothing to do
 	return nil
 }
 
-func (q *QEMUStubber) GetRosetta(mc *vmconfigs.MachineConfig) (bool, error) {
+func (q *QEMUStubber) GetRosetta(_ *vmconfigs.MachineConfig) (bool, error) {
 	return false, nil
 }

@@ -8,14 +8,14 @@ import (
 )
 
 func copyFile(src, dst string, sparse bool) error {
-	in, err := os.Open(src)
+	in, err := os.Open(src) // nolint:gosec
 	if err != nil {
 		return err
 	}
 
 	defer in.Close()
 
-	out, err := os.Create(dst)
+	out, err := os.Create(dst) // nolint:gosec
 	if err != nil {
 		return err
 	}
@@ -23,7 +23,7 @@ func copyFile(src, dst string, sparse bool) error {
 	defer out.Close()
 
 	if sparse {
-		if _, err = CopySparse(context.TODO(), out, in); err != nil {
+		if _, err = CopySparse(context.Background(), out, in); err != nil {
 			return err
 		}
 	} else {
@@ -32,12 +32,12 @@ func copyFile(src, dst string, sparse bool) error {
 		}
 	}
 
-	fi, err := os.Stat(src)
+	fi, err := os.Stat(src) // nolint:gosec
 	if err != nil {
 		return err
 	}
 
-	if err = os.Chmod(dst, fi.Mode()); err != nil {
+	if err = os.Chmod(dst, fi.Mode()); err != nil { // nolint:gosec // G703: paths from Stat
 		return err
 	}
 

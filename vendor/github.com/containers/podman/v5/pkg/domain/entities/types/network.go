@@ -1,7 +1,7 @@
 package types
 
 import (
-	commonTypes "github.com/containers/common/libnetwork/types"
+	commonTypes "go.podman.io/common/libnetwork/types"
 )
 
 // NetworkPruneReport containers the name of network and an error
@@ -14,7 +14,6 @@ type NetworkPruneReport struct {
 
 // NetworkReloadReport describes the results of reloading a container network.
 type NetworkReloadReport struct {
-	//nolint:stylecheck,revive
 	Id  string
 	Err error
 }

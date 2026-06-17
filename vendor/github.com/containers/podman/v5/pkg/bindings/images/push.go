@@ -10,10 +10,10 @@ import (
 	"os"
 	"strconv"
 
-	imageTypes "github.com/containers/image/v5/types"
 	"github.com/containers/podman/v5/pkg/auth"
 	"github.com/containers/podman/v5/pkg/bindings"
 	"github.com/containers/podman/v5/pkg/domain/entities/types"
+	imageTypes "go.podman.io/image/v5/types"
 )
 
 // Push is the binding for libpod's endpoints for push images.  Note that
@@ -74,7 +74,7 @@ LOOP:
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return err
+			return fmt.Errorf("failed to decode message from stream: %w", err)
 		}
 
 		select {

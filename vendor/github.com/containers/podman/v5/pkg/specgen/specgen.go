@@ -6,11 +6,11 @@ import (
 	"strings"
 	"syscall"
 
-	nettypes "github.com/containers/common/libnetwork/types"
-	"github.com/containers/image/v5/manifest"
 	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/storage/types"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
+	nettypes "go.podman.io/common/libnetwork/types"
+	"go.podman.io/image/v5/manifest"
+	"go.podman.io/storage/types"
 )
 
 // LogConfig describes the logging characteristics for a container
@@ -138,12 +138,12 @@ type ContainerBasicConfig struct {
 	// PidNS is the container's PID namespace.
 	// It defaults to private.
 	// Mandatory.
-	PidNS Namespace `json:"pidns,omitempty"`
+	PidNS Namespace `json:"pidns"`
 	// UtsNS is the container's UTS namespace.
 	// It defaults to private.
 	// Must be set to Private to set Hostname.
 	// Mandatory.
-	UtsNS Namespace `json:"utsns,omitempty"`
+	UtsNS Namespace `json:"utsns"`
 	// Hostname is the container's hostname. If not set, the hostname will
 	// not be modified (if UtsNS is not private) or will be set to the
 	// container ID (if UtsNS is private).
@@ -305,6 +305,8 @@ type ContainerStorageConfig struct {
 	// Image volumes bind-mount a container-image mount into the container.
 	// Optional.
 	ImageVolumes []*ImageVolume `json:"image_volumes,omitempty"`
+	// ArtifactVolumes volumes based on an existing artifact.
+	ArtifactVolumes []*ArtifactVolume `json:"artifact_volumes,omitempty"`
 	// Devices are devices that will be added to the container.
 	// Optional.
 	Devices []spec.LinuxDevice `json:"devices,omitempty"`
@@ -320,7 +322,7 @@ type ContainerStorageConfig struct {
 	// Default is private.
 	// Conflicts with ShmSize if not set to private.
 	// Mandatory.
-	IpcNS Namespace `json:"ipcns,omitempty"`
+	IpcNS Namespace `json:"ipcns"`
 	// ShmSize is the size of the tmpfs to mount in at /dev/shm, in bytes.
 	// Conflicts with ShmSize if IpcNS is not private.
 	// Optional.
@@ -416,7 +418,7 @@ type ContainerSecurityConfig struct {
 	// created.
 	// If set to private, IDMappings must be set.
 	// Mandatory.
-	UserNS Namespace `json:"userns,omitempty"`
+	UserNS Namespace `json:"userns"`
 	// IDMappings are UID and GID mappings that will be used by user
 	// namespaces.
 	// Required if UserNS is private.
@@ -456,7 +458,7 @@ type ContainerCgroupConfig struct {
 	// CgroupNS is the container's cgroup namespace.
 	// It defaults to private.
 	// Mandatory.
-	CgroupNS Namespace `json:"cgroupns,omitempty"`
+	CgroupNS Namespace `json:"cgroupns"`
 	// CgroupsMode sets a policy for how cgroups will be created for the
 	// container, including the ability to disable creation entirely.
 	// Optional.
@@ -473,7 +475,7 @@ type ContainerNetworkConfig struct {
 	// NetNS is the configuration to use for the container's network
 	// namespace.
 	// Mandatory.
-	NetNS Namespace `json:"netns,omitempty"`
+	NetNS Namespace `json:"netns"`
 	// PortBindings is a set of ports to map into the container.
 	// Only available if NetNS is set to bridge, slirp, or pasta.
 	// Optional.
@@ -627,8 +629,7 @@ type SpecGenerator struct {
 	ContainerResourceConfig
 	ContainerHealthCheckConfig
 
-	//nolint:unused // this is needed for the local client but golangci-lint
-	// does not seems to happy when we test the remote stub
+	//nolint:nolintlint,unused // "unused" complains when remote build tag is used, "nolintlint" complains otherwise.
 	cacheLibImage
 }
 

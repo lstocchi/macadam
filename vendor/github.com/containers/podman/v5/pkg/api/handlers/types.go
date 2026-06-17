@@ -6,9 +6,11 @@ import (
 	docker "github.com/docker/docker/api/types"
 	dockerBackend "github.com/docker/docker/api/types/backend"
 	dockerContainer "github.com/docker/docker/api/types/container"
+	dockerImage "github.com/docker/docker/api/types/image"
 	dockerNetwork "github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/api/types/system"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
@@ -17,9 +19,14 @@ type AuthConfig struct {
 }
 
 type ImageInspect struct {
-	docker.ImageInspect
-	// Container is for backwards compat but is basically unused
-	Container string
+	dockerImage.InspectResponse
+	// When you embed a struct, the fields of the embedded struct are "promoted" to the outer struct.
+	// If a field in the outer struct has the same name as a field in the embedded struct,
+	// the outer struct's field will shadow or override the embedded one allowing for a clean way to
+	// hide fields from the swagger spec that still exist in the libraries struct.
+	Container       string `json:"-"`
+	ContainerConfig string `json:"-"`
+	VirtualSize     string `json:"-"`
 }
 
 type ContainerConfig struct {
@@ -45,7 +52,7 @@ type LibpodImagesResolveReport struct {
 }
 
 type ContainersPruneReport struct {
-	docker.ContainersPruneReport
+	dockerContainer.PruneReport
 }
 
 type ContainersPruneReportLibpod struct {
@@ -77,6 +84,8 @@ type UpdateEntities struct {
 	specs.LinuxResources
 	define.UpdateHealthCheckConfig
 	define.UpdateContainerDevicesLimits
+	Env      []string
+	UnsetEnv []string
 }
 
 type Info struct {
@@ -101,11 +110,11 @@ type DiskUsage struct {
 }
 
 type VolumesPruneReport struct {
-	docker.VolumesPruneReport
+	volume.PruneReport
 }
 
 type ImagesPruneReport struct {
-	docker.ImagesPruneReport
+	dockerImage.PruneReport
 }
 
 type BuildCachePruneReport struct {
@@ -113,7 +122,7 @@ type BuildCachePruneReport struct {
 }
 
 type NetworkPruneReport struct {
-	docker.NetworksPruneReport
+	dockerNetwork.PruneReport
 }
 
 type ConfigCreateResponse struct {
@@ -166,7 +175,7 @@ type HistoryResponse struct {
 }
 
 type ExecCreateConfig struct {
-	docker.ExecConfig
+	dockerContainer.ExecOptions
 }
 
 type ExecStartConfig struct {

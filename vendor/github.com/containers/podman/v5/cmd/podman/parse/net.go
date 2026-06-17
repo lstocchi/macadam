@@ -10,8 +10,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/libnetwork/etchosts"
-	"github.com/containers/storage/pkg/regexp"
+	"go.podman.io/common/libnetwork/etchosts"
+	"go.podman.io/storage/pkg/regexp"
 )
 
 const (
@@ -28,7 +28,7 @@ var (
 	domainRegexp = regexp.Delayed(`^(:?(:?[a-zA-Z0-9]|(:?[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9]))(:?\.(:?[a-zA-Z0-9]|(:?[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])))*)\.?\s*$`)
 )
 
-// validateExtraHost validates that the specified string is a valid extrahost and returns it.
+// ValidateExtraHost validates that the specified string is a valid extrahost and returns it.
 // ExtraHost is in the form of name1;name2;name3:ip where the ip has to be a valid ip (ipv4 or ipv6) or the special string HostGateway.
 // for add-host flag
 func ValidateExtraHost(val string) (string, error) {
@@ -39,8 +39,7 @@ func ValidateExtraHost(val string) (string, error) {
 	}
 
 	// Split the hostnames by semicolon and validate each one
-	nameList := strings.Split(names, ";")
-	for _, name := range nameList {
+	for name := range strings.SplitSeq(names, ";") {
 		if len(name) == 0 {
 			return "", fmt.Errorf("hostname in add-host %q is empty", val)
 		}
@@ -157,14 +156,21 @@ func parseEnvOrLabelFile(envOrLabel map[string]string, filename, configType stri
 	return scanner.Err()
 }
 
-// ValidURL checks a string urlStr is a url or not
-func ValidURL(urlStr string) error {
-	url, err := url.ParseRequestURI(urlStr)
+// ValidWebURL checks a string urlStr is a url or not
+func ValidWebURL(urlStr string) error {
+	parsedURL, err := url.ParseRequestURI(urlStr)
 	if err != nil {
-		return fmt.Errorf("invalid url %q: %w", urlStr, err)
+		return fmt.Errorf("invalid URL %q: %w", urlStr, err)
 	}
-	if url.Scheme == "" {
-		return fmt.Errorf("invalid url %q: missing scheme", urlStr)
+
+	// to be a valid web url, scheme must be either http or https
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return fmt.Errorf("invalid URL %q: unsupported scheme %q", urlStr, parsedURL.Scheme)
+	}
+
+	// ensure url contain a host
+	if parsedURL.Host == "" {
+		return fmt.Errorf("invalid URL %q: missing host", urlStr)
 	}
 	return nil
 }

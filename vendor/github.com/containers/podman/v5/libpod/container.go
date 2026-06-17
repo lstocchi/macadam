@@ -7,21 +7,22 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/containers/common/libnetwork/pasta"
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/secrets"
-	"github.com/containers/image/v5/manifest"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/libpod/lock"
-	"github.com/containers/storage"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libnetwork/pasta"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/secrets"
+	"go.podman.io/image/v5/manifest"
+	"go.podman.io/storage"
 	"golang.org/x/sys/unix"
 )
 
@@ -145,9 +146,9 @@ type ContainerState struct {
 	// by containers/storage.
 	Mountpoint string `json:"mountPoint,omitempty"`
 	// StartedTime is the time the container was started
-	StartedTime time.Time `json:"startedTime,omitempty"`
+	StartedTime time.Time `json:"startedTime"`
 	// FinishedTime is the time the container finished executing
-	FinishedTime time.Time `json:"finishedTime,omitempty"`
+	FinishedTime time.Time `json:"finishedTime"`
 	// ExitCode is the exit code returned when the container stopped
 	ExitCode int32 `json:"exitCode,omitempty"`
 	// Exited is whether the container has exited
@@ -229,8 +230,8 @@ type ContainerState struct {
 
 	// Following checkpoint/restore related information is displayed
 	// if the container has been checkpointed or restored.
-	CheckpointedTime time.Time `json:"checkpointedTime,omitempty"`
-	RestoredTime     time.Time `json:"restoredTime,omitempty"`
+	CheckpointedTime time.Time `json:"checkpointedTime"`
+	RestoredTime     time.Time `json:"restoredTime"`
 	CheckpointLog    string    `json:"checkpointLog,omitempty"`
 	CheckpointPath   string    `json:"checkpointPath,omitempty"`
 	RestoreLog       string    `json:"restoreLog,omitempty"`
@@ -278,6 +279,33 @@ type ContainerImageVolume struct {
 	ReadWrite bool `json:"rw"`
 	// SubPath determines which part of the image will be mounted into the container.
 	SubPath string `json:"subPath,omitempty"`
+}
+
+// ContainerArtifactVolume is a volume based on a artifact. The artifact blobs will
+// be bind mounted directly as files and must always be read only.
+type ContainerArtifactVolume struct {
+	// Source is the name or digest of the artifact that should be mounted
+	Source string `json:"source"`
+	// Dest is the absolute path of the mount in the container.
+	// If path is a file in the container, then the artifact must consist of a single blob.
+	// Otherwise if it is a directory or does not exists all artifact blobs will be mounted
+	// into this path as files. As name the "org.opencontainers.image.title" will be used if
+	// available otherwise the digest is used as name.
+	Dest string `json:"dest"`
+	// Title can be used for multi blob artifacts to only mount the one specific blob that
+	// matches the "org.opencontainers.image.title" annotation.
+	// Optional. Conflicts with Digest.
+	Title string `json:"title"`
+	// Digest can be used to filter a single blob from a multi blob artifact by the given digest.
+	// When this option is set the file name in the container defaults to the digest even when
+	// the title annotation exist.
+	// Optional. Conflicts with Title.
+	Digest string `json:"digest"`
+	// Name is the name that should be used for the path inside the container. When a single blob
+	// is mounted the name is used as is. If multiple blobs are mounted then mount them as
+	// "<name>-x" where x is a 0 indexed integer based on the layer order.
+	// Optional.
+	Name string `json:"name,omitempty"`
 }
 
 // ContainerSecret is a secret that is mounted in a container
@@ -600,9 +628,7 @@ func (c *Container) Stdin() bool {
 // Labels returns the container's labels
 func (c *Container) Labels() map[string]string {
 	labels := make(map[string]string)
-	for key, value := range c.config.Labels {
-		labels[key] = value
-	}
+	maps.Copy(labels, c.config.Labels)
 	return labels
 }
 
@@ -640,6 +666,14 @@ func (c *Container) LogPath() string {
 // LogTag returns the tag to the container's log file
 func (c *Container) LogTag() string {
 	return c.config.LogTag
+}
+
+// LogSizeMax returns the maximum size of the container's log file.
+func (c *Container) LogSizeMax() int64 {
+	if c.config.LogSize > 0 {
+		return c.config.LogSize
+	}
+	return c.runtime.config.Containers.LogSizeMax
 }
 
 // RestartPolicy returns the container's restart policy.
@@ -706,14 +740,14 @@ func (c *Container) hostname(network bool) string {
 	// containers.conf, use a sanitized version of the container's name
 	// as the hostname.  Since the container name must already match
 	// the set '[a-zA-Z0-9][a-zA-Z0-9_.-]*', we can just remove any
-	// underscores and limit it to 253 characters to make it a valid
+	// underscores and limit it to 64 characters to make it a valid
 	// hostname.
 	if c.runtime.config.Containers.ContainerNameAsHostName {
 		sanitizedHostname := strings.ReplaceAll(c.Name(), "_", "")
-		if len(sanitizedHostname) <= 253 {
+		if len(sanitizedHostname) <= 64 {
 			return sanitizedHostname
 		}
-		return sanitizedHostname[:253]
+		return sanitizedHostname[:64]
 	}
 
 	// Otherwise use the container's short ID as the hostname.
@@ -1005,9 +1039,7 @@ func (c *Container) BindMounts() (map[string]string, error) {
 
 	newMap := make(map[string]string, len(c.state.BindMounts))
 
-	for key, val := range c.state.BindMounts {
-		newMap[key] = val
-	}
+	maps.Copy(newMap, c.state.BindMounts)
 
 	return newMap, nil
 }
@@ -1132,7 +1164,7 @@ func (c *Container) cGroupPath() (string, error) {
 	}
 
 	var cgroupPath string
-	for _, line := range bytes.Split(lines, []byte("\n")) {
+	for line := range bytes.SplitSeq(lines, []byte("\n")) {
 		// skip last empty line
 		if len(line) == 0 {
 			continue
@@ -1242,6 +1274,11 @@ func (c *Container) RootGID() int {
 // IsInfra returns whether the container is an infra container
 func (c *Container) IsInfra() bool {
 	return c.config.IsInfra
+}
+
+// IsDefaultInfra returns whether the container is a default infra container generated directly by podman
+func (c *Container) IsDefaultInfra() bool {
+	return c.config.IsDefaultInfra
 }
 
 // IsInitCtr returns whether the container is an init container

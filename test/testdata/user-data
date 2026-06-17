@@ -1,0 +1,25 @@
+#cloud-config
+hostname: macadam-test
+package_update: true
+package_upgrade: true
+
+packages:
+  - git         
+  - vim
+
+users:
+  - name: macadamtest
+    ssh_authorized_keys:
+      - [sshkey]
+    plain_text_passwd: "macadamtest"
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: false
+
+chpasswd:
+  expire: false
+
+ssh_pwauth: true
+
+runcmd:
+  - echo "Hello from cloud-init" > /home/macadamtest/hello.txt

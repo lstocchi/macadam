@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -25,47 +26,37 @@ import (
 	"github.com/containers/buildah/pkg/parse"
 	butil "github.com/containers/buildah/pkg/util"
 	"github.com/containers/buildah/util"
-	"github.com/containers/common/libnetwork/etchosts"
-	"github.com/containers/common/libnetwork/pasta"
-	"github.com/containers/common/libnetwork/resolvconf"
-	"github.com/containers/common/libnetwork/slirp4netns"
-	nettypes "github.com/containers/common/libnetwork/types"
-	netUtil "github.com/containers/common/libnetwork/util"
-	"github.com/containers/common/pkg/capabilities"
-	"github.com/containers/common/pkg/chown"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/hooks"
-	hooksExec "github.com/containers/common/pkg/hooks/exec"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/storage/pkg/fileutils"
-	"github.com/containers/storage/pkg/idtools"
-	"github.com/containers/storage/pkg/ioutils"
-	"github.com/containers/storage/pkg/lockfile"
-	"github.com/containers/storage/pkg/mount"
-	"github.com/containers/storage/pkg/stringid"
-	"github.com/containers/storage/pkg/unshare"
 	"github.com/docker/go-units"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libnetwork/etchosts"
+	"go.podman.io/common/libnetwork/pasta"
+	"go.podman.io/common/libnetwork/resolvconf"
+	"go.podman.io/common/libnetwork/slirp4netns"
+	nettypes "go.podman.io/common/libnetwork/types"
+	netUtil "go.podman.io/common/libnetwork/util"
+	"go.podman.io/common/pkg/capabilities"
+	"go.podman.io/common/pkg/chown"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/hooks"
+	hooksExec "go.podman.io/common/pkg/hooks/exec"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/storage/pkg/fileutils"
+	"go.podman.io/storage/pkg/idtools"
+	"go.podman.io/storage/pkg/ioutils"
+	"go.podman.io/storage/pkg/lockfile"
+	"go.podman.io/storage/pkg/mount"
+	"go.podman.io/storage/pkg/stringid"
+	"go.podman.io/storage/pkg/unshare"
 	"golang.org/x/sys/unix"
 	"tags.cncf.io/container-device-interface/pkg/cdi"
 	"tags.cncf.io/container-device-interface/pkg/parser"
 )
 
-var (
-	// We dont want to remove destinations with /etc, /dev, /sys,
-	// /proc as rootfs already contains these files and unionfs
-	// will create a `whiteout` i.e `.wh` files on removal of
-	// overlapping files from these directories.  everything other
-	// than these will be cleaned up
-	nonCleanablePrefixes = []string{
-		"/etc", "/dev", "/sys", "/proc",
-	}
-	// binfmtRegistered makes sure we only try to register binfmt_misc
-	// interpreters once, the first time we handle a RUN instruction.
-	binfmtRegistered sync.Once
-)
+// binfmtRegistered makes sure we only try to register binfmt_misc
+// interpreters once, the first time we handle a RUN instruction.
+var binfmtRegistered sync.Once
 
 func setChildProcess() error {
 	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, uintptr(1), 0, 0, 0); err != nil {
@@ -281,7 +272,7 @@ func (b *Builder) Run(command []string, options RunOptions) error {
 	}
 
 	// Combine the working container's set of devices with the ones for just this run.
-	deviceSpecs := append(append([]string{}, options.DeviceSpecs...), b.DeviceSpecs...)
+	deviceSpecs := slices.Concat(options.DeviceSpecs, b.DeviceSpecs)
 	deviceSpecs, err = b.cdiSetupDevicesInSpec(deviceSpecs, options.CDIConfigDir, g.Config) // makes changes to more than just the device list
 	if err != nil {
 		return err
@@ -302,7 +293,7 @@ func (b *Builder) Run(command []string, options RunOptions) error {
 		// We are going to create bind mounts for devices
 		// but we need to make sure that we don't override
 		// anything which is already in OCI spec.
-		mounts := make(map[string]interface{})
+		mounts := make(map[string]any)
 		for _, m := range g.Mounts() {
 			mounts[m.Destination] = true
 		}
@@ -456,7 +447,7 @@ func (b *Builder) Run(command []string, options RunOptions) error {
 	}
 
 	resolvFile := ""
-	if !slices.Contains(volumes, resolvconf.DefaultResolvConf) && options.ConfigureNetwork != define.NetworkDisabled && !(len(b.CommonBuildOpts.DNSServers) == 1 && strings.ToLower(b.CommonBuildOpts.DNSServers[0]) == "none") {
+	if !slices.Contains(volumes, resolvconf.DefaultResolvConf) && options.ConfigureNetwork != define.NetworkDisabled && (len(b.CommonBuildOpts.DNSServers) != 1 || strings.ToLower(b.CommonBuildOpts.DNSServers[0]) != "none") {
 		resolvFile, err = b.createResolvConf(path, rootIDPair)
 		if err != nil {
 			return err
@@ -527,6 +518,28 @@ rootless=%d
 		spec.Process.Env = append(spec.Process.Env, sshenv)
 	}
 
+	// Create any mount points that we need that aren't already present in
+	// the rootfs.
+	createdMountTargets, err := b.createMountTargets(spec)
+	if err != nil {
+		return fmt.Errorf("ensuring mount targets for container %q: %w", b.ContainerID, err)
+	}
+	defer func() {
+		// Attempt to clean up mount targets for the sake of builds
+		// that don't commit and rebase at each step, and people using
+		// `buildah run` more than once, who don't expect empty mount
+		// points to stick around.  They'll still get filtered out at
+		// commit-time if another concurrent Run() is keeping something
+		// busy.
+		if _, err := copier.ConditionalRemove(mountPoint, mountPoint, copier.ConditionalRemoveOptions{
+			UIDMap: b.store.UIDMap(),
+			GIDMap: b.store.GIDMap(),
+			Paths:  createdMountTargets,
+		}); err != nil {
+			options.Logger.Errorf("unable to cleanup run mount targets %v", err)
+		}
+	}()
+
 	// following run was called from `buildah run`
 	// and some images were mounted for this run
 	// add them to cleanup artifacts
@@ -535,12 +548,37 @@ rootless=%d
 	}
 
 	defer func() {
-		if err := b.cleanupRunMounts(mountPoint, runArtifacts); err != nil {
+		if err := b.cleanupRunMounts(runArtifacts); err != nil {
 			options.Logger.Errorf("unable to cleanup run mounts %v", err)
 		}
 	}()
 
-	defer b.cleanupTempVolumes()
+	// Handle mount flags that request that the source locations for "bind" mountpoints be
+	// relabeled, and filter those flags out of the list of mount options we pass to the
+	// runtime.
+	for i := range spec.Mounts {
+		switch spec.Mounts[i].Type {
+		default:
+			continue
+		case "bind", "rbind":
+			// all good, keep going
+		}
+		zflag := ""
+		for _, opt := range spec.Mounts[i].Options {
+			if opt == "z" || opt == "Z" {
+				zflag = opt
+			}
+		}
+		if zflag == "" {
+			continue
+		}
+		spec.Mounts[i].Options = slices.DeleteFunc(spec.Mounts[i].Options, func(opt string) bool {
+			return opt == "z" || opt == "Z"
+		})
+		if err := relabel(spec.Mounts[i].Source, b.MountLabel, zflag == "z"); err != nil {
+			return fmt.Errorf("setting file label %q on %q: %w", b.MountLabel, spec.Mounts[i].Source, err)
+		}
+	}
 
 	switch isolation {
 	case define.IsolationOCI:
@@ -586,9 +624,7 @@ func (b *Builder) setupOCIHooks(config *specs.Spec, hasVolumes bool) (map[string
 			if len(ociHooks) > 0 || config.Hooks != nil {
 				logrus.Warnf("Implicit hook directories are deprecated; set --hooks-dir=%q explicitly to continue to load ociHooks from this directory", hDir)
 			}
-			for i, hook := range ociHooks {
-				allHooks[i] = hook
-			}
+			maps.Copy(allHooks, ociHooks)
 		}
 	} else {
 		manager, err := hooks.New(context.Background(), b.CommonBuildOpts.OCIHooksDir, []string{})
@@ -691,9 +727,9 @@ func setupSlirp4netnsNetwork(config *config.Config, netns, cid string, options, 
 	}
 
 	return func() {
-		syscall.Kill(res.Pid, syscall.SIGKILL) // nolint:errcheck
+		syscall.Kill(res.Pid, syscall.SIGKILL) //nolint:errcheck
 		var status syscall.WaitStatus
-		syscall.Wait4(res.Pid, &status, 0, nil) // nolint:errcheck
+		syscall.Wait4(res.Pid, &status, 0, nil) //nolint:errcheck
 	}, result, nil
 }
 
@@ -991,7 +1027,17 @@ func (b *Builder) configureNamespaces(g *generate.Generator, options *RunOptions
 		} else if b.Hostname() != "" {
 			g.SetHostname(b.Hostname())
 		} else {
-			g.SetHostname(stringid.TruncateID(b.ContainerID))
+			hostname := stringid.TruncateID(b.ContainerID)
+			defConfig, err := config.Default()
+			if err != nil {
+				return false, "", fmt.Errorf("failed to get container config: %w", err)
+			}
+			if defConfig.Containers.ContainerNameAsHostName {
+				if mapped := mapContainerNameToHostname(b.Container); mapped != "" {
+					hostname = mapped
+				}
+			}
+			g.SetHostname(hostname)
 		}
 	} else {
 		g.SetHostname("")
@@ -1052,41 +1098,41 @@ func addRlimits(ulimit []string, g *generate.Generator, defaultUlimits []string)
 		g.AddProcessRlimits("RLIMIT_"+strings.ToUpper(ul.Name), uint64(ul.Hard), uint64(ul.Soft))
 	}
 	if !nofileSet {
-		max := define.RLimitDefaultValue
+		lim := define.RLimitDefaultValue
 		var rlimit unix.Rlimit
 		if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &rlimit); err == nil {
-			if max < rlimit.Max || unshare.IsRootless() {
-				max = rlimit.Max
+			if lim < rlimit.Max || unshare.IsRootless() {
+				lim = rlimit.Max
 			}
 		} else {
 			logrus.Warnf("Failed to return RLIMIT_NOFILE ulimit %q", err)
 		}
-		g.AddProcessRlimits("RLIMIT_NOFILE", max, max)
+		g.AddProcessRlimits("RLIMIT_NOFILE", lim, lim)
 	}
 	if !nprocSet {
-		max := define.RLimitDefaultValue
+		lim := define.RLimitDefaultValue
 		var rlimit unix.Rlimit
 		if err := unix.Getrlimit(unix.RLIMIT_NPROC, &rlimit); err == nil {
-			if max < rlimit.Max || unshare.IsRootless() {
-				max = rlimit.Max
+			if lim < rlimit.Max || unshare.IsRootless() {
+				lim = rlimit.Max
 			}
 		} else {
 			logrus.Warnf("Failed to return RLIMIT_NPROC ulimit %q", err)
 		}
-		g.AddProcessRlimits("RLIMIT_NPROC", max, max)
+		g.AddProcessRlimits("RLIMIT_NPROC", lim, lim)
 	}
 
 	return nil
 }
 
-func (b *Builder) runSetupVolumeMounts(mountLabel string, volumeMounts []string, optionMounts []specs.Mount, idMaps IDMaps) (mounts []specs.Mount, Err error) {
+func (b *Builder) runSetupVolumeMounts(mountLabel string, volumeMounts []string, optionMounts []specs.Mount, idMaps IDMaps) (mounts []specs.Mount, overlayDirs []string, Err error) {
 	// Make sure the overlay directory is clean before running
 	containerDir, err := b.store.ContainerDirectory(b.ContainerID)
 	if err != nil {
-		return nil, fmt.Errorf("looking up container directory for %s: %w", b.ContainerID, err)
+		return nil, nil, fmt.Errorf("looking up container directory for %s: %w", b.ContainerID, err)
 	}
 	if err := overlay.CleanupContent(containerDir); err != nil {
-		return nil, fmt.Errorf("cleaning up overlay content for %s: %w", b.ContainerID, err)
+		return nil, nil, fmt.Errorf("cleaning up overlay content for %s: %w", b.ContainerID, err)
 	}
 
 	parseMount := func(mountType, host, container string, options []string) (specs.Mount, error) {
@@ -1130,16 +1176,19 @@ func (b *Builder) runSetupVolumeMounts(mountLabel string, volumeMounts []string,
 			if err := relabel(host, mountLabel, true); err != nil {
 				return specs.Mount{}, err
 			}
+			options = slices.DeleteFunc(options, func(o string) bool { return o == "z" })
 		}
 		if foundZ {
 			if err := relabel(host, mountLabel, false); err != nil {
 				return specs.Mount{}, err
 			}
+			options = slices.DeleteFunc(options, func(o string) bool { return o == "Z" })
 		}
 		if foundU {
 			if err := chown.ChangeHostPathOwnership(host, true, idMaps.processUID, idMaps.processGID); err != nil {
 				return specs.Mount{}, err
 			}
+			options = slices.DeleteFunc(options, func(o string) bool { return o == "U" })
 		}
 		if foundO {
 			if (upperDir != "" && workDir == "") || (workDir != "" && upperDir == "") {
@@ -1166,7 +1215,7 @@ func (b *Builder) runSetupVolumeMounts(mountLabel string, volumeMounts []string,
 
 			overlayMount, err := overlay.MountWithOptions(contentDir, host, container, &overlayOpts)
 			if err == nil {
-				b.TempVolumes[contentDir] = true
+				overlayDirs = append(overlayDirs, contentDir)
 			}
 
 			// If chown true, add correct ownership to the overlay temp directories.
@@ -1198,7 +1247,7 @@ func (b *Builder) runSetupVolumeMounts(mountLabel string, volumeMounts []string,
 		logrus.Debugf("setting up mounted volume at %q", i.Destination)
 		mount, err := parseMount(i.Type, i.Source, i.Destination, i.Options)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		mounts = append(mounts, mount)
 	}
@@ -1212,20 +1261,28 @@ func (b *Builder) runSetupVolumeMounts(mountLabel string, volumeMounts []string,
 		options = append(options, "rbind")
 		mount, err := parseMount("bind", spliti[0], spliti[1], options)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		mounts = append(mounts, mount)
 	}
-	return mounts, nil
+	return mounts, overlayDirs, nil
 }
 
 func setupMaskedPaths(g *generate.Generator, opts *define.CommonBuildOptions) {
 	if slices.Contains(opts.Unmasks, "all") {
 		return
 	}
-	for _, mp := range append(config.DefaultMaskedPaths, opts.Masks...) {
-		if slices.Contains(opts.Unmasks, mp) {
-			continue
+nextMaskedPath:
+	for _, mp := range append(config.DefaultMaskedPaths(), opts.Masks...) {
+		for _, unmask := range opts.Unmasks {
+			match, err := filepath.Match(unmask, mp)
+			if err != nil {
+				logrus.Warnf("Invalid unmask pattern %q: %v", unmask, err)
+				continue
+			}
+			if match {
+				continue nextMaskedPath
+			}
 		}
 		g.AddLinuxMaskedPaths(mp)
 	}
@@ -1470,9 +1527,12 @@ func (b *Builder) getCacheMount(tokens []string, sys *types.SystemContext, stage
 		}
 	}()
 	optionMounts = append(optionMounts, optionMount)
-	volumes, err := b.runSetupVolumeMounts(b.MountLabel, nil, optionMounts, idMaps)
+	volumes, overlayDirs, err := b.runSetupVolumeMounts(b.MountLabel, nil, optionMounts, idMaps)
 	if err != nil {
 		return nil, "", "", "", nil, err
+	}
+	if len(overlayDirs) != 0 {
+		return nil, "", "", "", nil, errors.New("internal error: did not expect a resolved cache mount to use the O flag")
 	}
 	succeeded = true
 	return &volumes[0], mountedImage, intermediateMount, overlayMount, targetLock, nil

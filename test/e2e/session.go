@@ -7,11 +7,12 @@ import (
 	"syscall"
 	"time"
 
-	. "github.com/onsi/gomega"
-	. "github.com/onsi/gomega/gexec"
+	. "github.com/onsi/gomega"       //nolint:staticcheck
+	. "github.com/onsi/gomega/gexec" //nolint:staticcheck
 )
 
-var DefaultWaitTimeout = 90
+// test on Azure winodws VM machine, init of hyperv is super slow.
+var DefaultWaitTimeout = 800
 
 // MacadamSession wraps the gexec.session so we can extend it
 type MacadamSession struct {

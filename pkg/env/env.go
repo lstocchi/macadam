@@ -5,19 +5,19 @@ import (
 	"path/filepath"
 
 	"github.com/containers/podman/v5/pkg/machine/define"
-	provider2 "github.com/containers/podman/v5/pkg/machine/provider"
-	"github.com/containers/storage/pkg/homedir"
+	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
+	"go.podman.io/storage/pkg/homedir"
 )
 
 const connectionsFile = "macadam-connections.json"
 
-func SetupEnvironment() error {
+func SetupEnvironment(provider vmconfigs.VMProvider) error {
 	path, err := homedir.GetConfigHome()
 	if err != nil {
 		return err
 	}
 
-	connsFile := filepath.Join(filepath.Dir(path), "macadam", connectionsFile)
+	connsFile := filepath.Join(path, "macadam", connectionsFile)
 	// set the path used for storing connection of macadam vms
 	err = os.Setenv("PODMAN_CONNECTIONS_CONF", connsFile)
 	if err != nil {
@@ -33,13 +33,8 @@ func SetupEnvironment() error {
 	}
 
 	// set the directory to be used when calculating runtime path
-	// run -> <runHome>/macadam (runHome changes based on the OS used e.g. runHome == /run)
-	err = os.Setenv("PODMAN_RUNTIME_DIR", "macadam")
-	if err != nil {
-		return err
-	}
-
-	provider, err := provider2.Get()
+	// run -> <runHome>/macadam/<provider> (runHome changes based on the OS used e.g. runHome == /run)
+	err = os.Setenv("PODMAN_RUNTIME_DIR", filepath.Join("macadam", provider.VMType().String()))
 	if err != nil {
 		return err
 	}

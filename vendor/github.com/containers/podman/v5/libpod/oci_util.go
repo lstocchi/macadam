@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containers/common/libnetwork/types"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libnetwork/types"
 )
 
 // Timeout before declaring that runtime has failed to kill a given
@@ -27,11 +27,6 @@ type ociError struct {
 	Msg   string `json:"msg,omitempty"`
 }
 
-// Create systemd unit name for cgroup scopes
-func createUnitName(prefix string, name string) string {
-	return fmt.Sprintf("%s-%s.scope", prefix, name)
-}
-
 // Bind ports to keep them closed on the host
 func bindPorts(ports []types.PortMapping) ([]*os.File, error) {
 	var files []*os.File
@@ -41,8 +36,8 @@ func bindPorts(ports []types.PortMapping) ([]*os.File, error) {
 		if port.HostIP == "" {
 			isV6 = false
 		}
-		protocols := strings.Split(port.Protocol, ",")
-		for _, protocol := range protocols {
+		protocols := strings.SplitSeq(port.Protocol, ",")
+		for protocol := range protocols {
 			for i := uint16(0); i < port.Range; i++ {
 				f, err := bindPort(protocol, port.HostIP, port.HostPort+i, isV6, &sctpWarning)
 				if err != nil {

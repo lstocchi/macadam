@@ -8,20 +8,20 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/containers/common/pkg/config"
 	"github.com/containers/podman/v5/pkg/errorhandling"
+	"github.com/containers/podman/v5/pkg/machine/cloudinit"
 	"github.com/containers/podman/v5/pkg/machine/define"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
-	"github.com/containers/storage/pkg/fileutils"
 	"github.com/digitalocean/go-qemu/qmp"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/storage/pkg/fileutils"
 )
 
 func NewStubber() (*QEMUStubber, error) {
@@ -96,7 +96,7 @@ func (q *QEMUStubber) checkStatus(monitor *qmp.SocketMonitor) (define.Status, er
 func (q *QEMUStubber) waitForMachineToStop(mc *vmconfigs.MachineConfig) error {
 	fmt.Println("Waiting for VM to stop running...")
 	waitInternal := 250 * time.Millisecond
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		state, err := q.State(mc, false)
 		if err != nil {
 			return err
@@ -114,12 +114,12 @@ func (q *QEMUStubber) waitForMachineToStop(mc *vmconfigs.MachineConfig) error {
 }
 
 // Stop uses the qmp monitor to call a system_powerdown
-func (q *QEMUStubber) StopVM(mc *vmconfigs.MachineConfig, _ bool) error {
+func (q *QEMUStubber) StopVM(mc *vmconfigs.MachineConfig, hardStop bool) error {
 	if err := mc.Refresh(); err != nil {
 		return err
 	}
 
-	stopErr := q.stopLocked(mc)
+	stopErr := q.stopLocked(mc, hardStop)
 
 	// Make sure that the associated QEMU process gets killed in case it's
 	// still running (#16054).
@@ -146,7 +146,7 @@ func (q *QEMUStubber) StopVM(mc *vmconfigs.MachineConfig, _ bool) error {
 }
 
 // stopLocked stops the machine and expects the caller to hold the machine's lock.
-func (q *QEMUStubber) stopLocked(mc *vmconfigs.MachineConfig) error {
+func (q *QEMUStubber) stopLocked(mc *vmconfigs.MachineConfig, hardStop bool) error {
 	// check if the qmp socket is there. if not, qemu instance is gone
 	if err := fileutils.Exists(mc.QEMUHypervisor.QMPMonitor.Address.GetPath()); errors.Is(err, fs.ErrNotExist) {
 		// Right now it is NOT an error to stop a stopped machine
@@ -166,10 +166,14 @@ func (q *QEMUStubber) stopLocked(mc *vmconfigs.MachineConfig) error {
 		return err
 	}
 	// Simple JSON formation for the QAPI
+	qemuCommand := "system_powerdown"
+	if hardStop {
+		qemuCommand = "quit"
+	}
 	stopCommand := struct {
 		Execute string `json:"execute"`
 	}{
-		Execute: "system_powerdown",
+		Execute: qemuCommand,
 	}
 
 	input, err := json.Marshal(stopCommand)
@@ -191,7 +195,13 @@ func (q *QEMUStubber) stopLocked(mc *vmconfigs.MachineConfig) error {
 	}()
 
 	if _, err = qmpMonitor.Run(input); err != nil {
-		return err
+		//if we are doing a hard stop, we expect the socket to potentially drop
+		var opErr *net.OpError
+		if hardStop && (errors.As(err, &opErr) || errors.Is(err, io.EOF)) {
+			logrus.Debugf("QMP monitor closed during quit: %v", err)
+		} else {
+			return err
+		}
 	}
 
 	// Remove socket
@@ -201,7 +211,7 @@ func (q *QEMUStubber) stopLocked(mc *vmconfigs.MachineConfig) error {
 
 	if err := qmpMonitor.Disconnect(); err != nil {
 		// FIXME: this error should probably be returned
-		return nil //nolint: nilerr
+		return nil
 	}
 	disconnected = true
 
@@ -232,6 +242,11 @@ func (q *QEMUStubber) Remove(mc *vmconfigs.MachineConfig) ([]string, func() erro
 		mc.QEMUHypervisor.QMPMonitor.Address.GetPath(),
 	}
 
+	cloudinitISO, err := cloudinit.GetCloudInitISOVMFile(mc)
+	if err == nil {
+		qemuRmFiles = append(qemuRmFiles, cloudinitISO.GetPath())
+	}
+
 	return qemuRmFiles, func() error {
 		var errs []error
 		if err := mc.QEMUHypervisor.QEMUPidPath.Delete(); err != nil {
@@ -241,11 +256,18 @@ func (q *QEMUStubber) Remove(mc *vmconfigs.MachineConfig) ([]string, func() erro
 		if err := mc.QEMUHypervisor.QMPMonitor.Address.Delete(); err != nil {
 			errs = append(errs, err)
 		}
+
+		if cloudinitISO != nil {
+			if err := cloudinitISO.Delete(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+
 		return errorhandling.JoinErrors(errs)
 	}, nil
 }
 
-func (q *QEMUStubber) State(mc *vmconfigs.MachineConfig, bypass bool) (define.Status, error) {
+func (q *QEMUStubber) State(mc *vmconfigs.MachineConfig, _ bool) (define.Status, error) {
 	// Check if qmp socket path exists
 	if err := fileutils.Exists(mc.QEMUHypervisor.QMPMonitor.Address.GetPath()); errors.Is(err, fs.ErrNotExist) {
 		return define.Stopped, nil
@@ -296,44 +318,4 @@ func (q *QEMUStubber) State(mc *vmconfigs.MachineConfig, bypass bool) (define.St
 	}()
 	// If there is a monitor, let's see if we can query state
 	return q.checkStatus(monitor)
-}
-
-// executes qemu-image info to get the virtual disk size
-// of the diskimage
-func getDiskSize(path string) (uint64, error) { //nolint:unused
-	// Find the qemu executable
-	cfg, err := config.Default()
-	if err != nil {
-		return 0, err
-	}
-	qemuPathDir, err := cfg.FindHelperBinary("qemu-img", true)
-	if err != nil {
-		return 0, err
-	}
-	diskInfo := exec.Command(qemuPathDir, "info", "--output", "json", path)
-	stdout, err := diskInfo.StdoutPipe()
-	if err != nil {
-		return 0, err
-	}
-	if err := diskInfo.Start(); err != nil {
-		return 0, err
-	}
-	tmpInfo := struct {
-		VirtualSize    uint64 `json:"virtual-size"`
-		Filename       string `json:"filename"`
-		ClusterSize    int64  `json:"cluster-size"`
-		Format         string `json:"format"`
-		FormatSpecific struct {
-			Type string            `json:"type"`
-			Data map[string]string `json:"data"`
-		}
-		DirtyFlag bool `json:"dirty-flag"`
-	}{}
-	if err := json.NewDecoder(stdout).Decode(&tmpInfo); err != nil {
-		return 0, err
-	}
-	if err := diskInfo.Wait(); err != nil {
-		return 0, err
-	}
-	return tmpInfo.VirtualSize, nil
 }

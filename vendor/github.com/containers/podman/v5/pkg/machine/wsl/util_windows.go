@@ -16,9 +16,10 @@ import (
 	"unsafe"
 
 	"github.com/Microsoft/go-winio"
-	"github.com/containers/storage/pkg/fileutils"
-	"github.com/containers/storage/pkg/homedir"
+	"github.com/containers/podman/v5/pkg/machine/define"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/storage/pkg/fileutils"
+	"go.podman.io/storage/pkg/homedir"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
@@ -41,28 +42,11 @@ type SHELLEXECUTEINFO struct {
 	hProcess       syscall.Handle
 }
 
-type Luid struct {
-	lowPart  uint32
-	highPart int32
-}
-
-type LuidAndAttributes struct {
-	luid       Luid
-	attributes uint32
-}
-
-type TokenPrivileges struct {
-	privilegeCount uint32
-	privileges     [1]LuidAndAttributes
-}
-
 // Cleaner to refer to the official OS constant names, and consistent with syscall
 // Ref: https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-shellexecuteinfow#members
 const (
-	//nolint:stylecheck
 	SEE_MASK_NOCLOSEPROCESS = 0x40
-	//nolint:stylecheck
-	SE_ERR_ACCESSDENIED = 0x05
+	SE_ERR_ACCESSDENIED     = 0x05
 )
 
 const (
@@ -191,7 +175,7 @@ func wrapMaybe(err error, message string) error {
 	return errors.New(message)
 }
 
-func wrapMaybef(err error, format string, args ...interface{}) error {
+func wrapMaybef(err error, format string, args ...any) error {
 	if err != nil {
 		return fmt.Errorf(format+": %w", append(args, err)...)
 	}
@@ -215,11 +199,11 @@ func reboot() error {
 	if err != nil {
 		return fmt.Errorf("could not determine data directory: %w", err)
 	}
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return fmt.Errorf("could not create data directory: %w", err)
 	}
 	commFile := filepath.Join(dataDir, "podman-relaunch.dat")
-	if err := os.WriteFile(commFile, []byte(encoded), 0600); err != nil {
+	if err := os.WriteFile(commFile, []byte(encoded), 0o600); err != nil {
 		return fmt.Errorf("could not serialize command state: %w", err)
 	}
 
@@ -233,6 +217,10 @@ func reboot() error {
 		}
 	}
 
+	if err := addRunOnceRegistryEntry(command); err != nil {
+		return err
+	}
+
 	message := "To continue the process of enabling WSL, the system needs to reboot. " +
 		"Alternatively, you can cancel and reboot manually\n\n" +
 		"After rebooting, please wait a minute or two for podman machine to relaunch and continue installing."
@@ -241,10 +229,6 @@ func reboot() error {
 		fmt.Println("Reboot is required to continue installation, please reboot at your convenience")
 		os.Exit(ErrorSuccessRebootRequired)
 		return nil
-	}
-
-	if err := addRunOnceRegistryEntry(command); err != nil {
-		return err
 	}
 
 	if err := winio.RunWithPrivilege(rebootPrivilege, func() error {
@@ -256,7 +240,7 @@ func reboot() error {
 		return fmt.Errorf("cannot reboot system: %w", err)
 	}
 
-	return nil
+	return define.ErrRebootInitiated
 }
 
 func addRunOnceRegistryEntry(command string) error {

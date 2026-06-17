@@ -3,18 +3,19 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/env"
+	"github.com/containers/podman/v5/pkg/machine/shim"
 
-	"github.com/containers/common/pkg/completion"
 	"github.com/containers/podman/v5/cmd/podman/utils"
 	"github.com/containers/podman/v5/pkg/machine"
-	providerpkg "github.com/containers/podman/v5/pkg/machine/provider"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/crc-org/macadam/cmd/macadam/registry"
+	provider2 "github.com/crc-org/macadam/pkg/machinedriver/provider"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
 )
 
 var (
@@ -49,16 +50,11 @@ func init() {
 
 func ssh(cmd *cobra.Command, args []string) error {
 	var (
-		err     error
-		mc      *vmconfigs.MachineConfig
-		validVM bool
+		err error
+		mc  *vmconfigs.MachineConfig
 	)
 
-	provider, err := providerpkg.Get()
-	if err != nil {
-		return nil
-	}
-	dirs, err := env.GetMachineDirs(provider.VMType())
+	vmProvider, err := provider2.GetProviderOrDefault(provider)
 	if err != nil {
 		return err
 	}
@@ -72,13 +68,12 @@ func ssh(cmd *cobra.Command, args []string) error {
 		// note: previous incantations of this up by a specific name
 		// and errors were ignored.  this error is not ignored because
 		// it implies podman cannot read its machine files, which is bad
-		machines, err := vmconfigs.LoadMachinesInDir(dirs)
+		mc, _, err = shim.VMExists(args[0], []vmconfigs.VMProvider{vmProvider})
 		if err != nil {
 			return err
 		}
 
-		mc, validVM = machines[args[0]]
-		if validVM {
+		if mc != nil {
 			vmName = args[0]
 		} else {
 			sshOpts.Args = append(sshOpts.Args, args[0])
@@ -88,7 +83,7 @@ func ssh(cmd *cobra.Command, args []string) error {
 	// If len is greater than 1, it means we might have been
 	// given a vmname and args or just args
 	if len(args) > 1 {
-		if validVM {
+		if mc != nil {
 			sshOpts.Args = args[1:]
 		} else {
 			sshOpts.Args = args
@@ -97,13 +92,21 @@ func ssh(cmd *cobra.Command, args []string) error {
 
 	// If the machine config was not loaded earlier, we load it now
 	if mc == nil {
-		mc, err = vmconfigs.LoadMachineByName(vmName, dirs)
+		mc, _, err = shim.VMExists(vmName, []vmconfigs.VMProvider{vmProvider})
+		// we just return generic error message as we cannot be sure the vm should have the default name or not
+		// in the previous if branch we tested with args[0] and it did not exist
+		// here we tried with the default name.
+		// If we fail here it could mean the machine has been deleted externally (e.g through hyperv manager) and
+		// we cannot be sure what the user is targetting.
 		if err != nil {
-			return fmt.Errorf("vm %s not found: %w", vmName, err)
+			return fmt.Errorf("VM not found: %w", err)
+		}
+		if mc == nil {
+			return errors.New("VM does not exist")
 		}
 	}
 
-	state, err := provider.State(mc, false)
+	state, err := vmProvider.State(mc, false)
 	if err != nil {
 		return err
 	}
@@ -116,6 +119,6 @@ func ssh(cmd *cobra.Command, args []string) error {
 		username = mc.SSH.RemoteUsername
 	}
 
-	err = machine.CommonSSHShell(username, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, sshOpts.Args)
+	err = machine.LocalhostSSHShellWithAddress(username, mc.SSH.IdentityPath, mc.Name, mc.GetAddress(), mc.SSH.Port, sshOpts.Args)
 	return utils.HandleOSExecError(err)
 }

@@ -3,25 +3,16 @@ package entities
 import (
 	"net"
 
-	"github.com/containers/common/libnetwork/types"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/libpod/events"
 	entitiesTypes "github.com/containers/podman/v5/pkg/domain/entities/types"
 	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/storage/pkg/archive"
-	dockerAPI "github.com/docker/docker/api/types"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/storage/pkg/archive"
 )
 
-type Container struct {
-	IDOrNamed
-}
-
-type Volume struct {
-	Identifier
-}
-
 type Report struct {
-	Id  []string //nolint:revive,stylecheck
+	Id  []string
 	Err map[string]error
 }
 
@@ -57,7 +48,7 @@ type NetOptions struct {
 	DNSSearch          []string                           `json:"dns_search,omitempty"`
 	DNSServers         []net.IP                           `json:"dns_server,omitempty"`
 	HostsFile          string                             `json:"hosts_file,omitempty"`
-	Network            specgen.Namespace                  `json:"netns,omitempty"`
+	Network            specgen.Namespace                  `json:"netns"`
 	NoHostname         bool                               `json:"no_manage_hostname,omitempty"`
 	NoHosts            bool                               `json:"no_manage_hosts,omitempty"`
 	PublishPorts       []types.PortMapping                `json:"portmappings,omitempty"`
@@ -117,5 +108,4 @@ type IDOrNameResponse struct {
 	IDOrName string
 }
 
-// swagger:model
-type IDResponse dockerAPI.IDResponse
+type IDResponse = entitiesTypes.IDResponse

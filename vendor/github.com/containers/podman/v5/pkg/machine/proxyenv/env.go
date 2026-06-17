@@ -6,11 +6,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/libnetwork/etchosts"
-	"github.com/containers/common/pkg/config"
 	"github.com/containers/podman/v5/pkg/machine"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libnetwork/etchosts"
+	"go.podman.io/common/pkg/config"
 )
 
 const proxySetupScriptTemplate = `#!/bin/bash
@@ -52,6 +52,6 @@ func getProxyScript(isWSL bool) io.Reader {
 }
 
 func ApplyProxies(mc *vmconfigs.MachineConfig) error {
-	return machine.CommonSSHWithStdin(mc.SSH.RemoteUsername, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, []string{"sudo", "/usr/bin/bash"},
+	return machine.LocalhostSSHWithStdin("root", mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, []string{"/usr/bin/bash"},
 		getProxyScript(mc.WSLHypervisor != nil))
 }

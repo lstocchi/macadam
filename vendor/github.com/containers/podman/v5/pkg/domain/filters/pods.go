@@ -9,10 +9,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/containers/common/pkg/filters"
-	"github.com/containers/common/pkg/util"
 	"github.com/containers/podman/v5/libpod"
 	"github.com/containers/podman/v5/libpod/define"
+	"go.podman.io/common/pkg/filters"
+	"go.podman.io/common/pkg/util"
 )
 
 // GeneratePodFilterFunc takes a filter and filtervalue (key, value)
@@ -75,9 +75,10 @@ func GeneratePodFilterFunc(filter string, filterValues []string, r *libpod.Runti
 			}
 			for _, ctrStatus := range ctrStatuses {
 				state := ctrStatus.String()
-				if ctrStatus == define.ContainerStateConfigured {
+				switch ctrStatus {
+				case define.ContainerStateConfigured:
 					state = "created"
-				} else if ctrStatus == define.ContainerStateStopped {
+				case define.ContainerStateStopped:
 					state = "exited"
 				}
 				for _, filterValue := range filterValues {
@@ -110,12 +111,7 @@ func GeneratePodFilterFunc(filter string, filterValues []string, r *libpod.Runti
 			if err != nil {
 				return false
 			}
-			for _, filterValue := range filterValues {
-				if strings.ToLower(status) == filterValue {
-					return true
-				}
-			}
-			return false
+			return slices.Contains(filterValues, strings.ToLower(status))
 		}, nil
 	case "label":
 		return func(p *libpod.Pod) bool {

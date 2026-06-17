@@ -1,8 +1,8 @@
 SHELL := bash
 
-MACADAM_VERSION = 0.0.2
-GVPROXY_VERSION ?= 0.8.5
-VFKIT_VERSION ?= 0.6.1
+MACADAM_VERSION = $(shell git describe --always --dirty)
+GVPROXY_VERSION ?= 0.8.8
+VFKIT_VERSION ?= 0.6.3
 GVPROXY_RELEASE_URL ?= https://github.com/containers/gvisor-tap-vsock/releases/download/v$(GVPROXY_VERSION)/gvproxy-darwin
 VFKIT_RELEASE_URL ?= https://github.com/crc-org/vfkit/releases/download/v$(VFKIT_VERSION)/vfkit-unsigned
 PACKAGE_DIR ?= out/packaging

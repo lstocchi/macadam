@@ -4,19 +4,19 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/containers/common/pkg/config"
 	gvproxy "github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/containers/podman/v5/pkg/machine"
 	"github.com/containers/podman/v5/pkg/machine/connection"
 	"github.com/containers/podman/v5/pkg/machine/define"
 	"github.com/containers/podman/v5/pkg/machine/env"
 	"github.com/containers/podman/v5/pkg/machine/ports"
+	"github.com/containers/podman/v5/pkg/machine/sockets"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/config"
 )
 
 const (
@@ -54,10 +54,17 @@ func startHostForwarder(mc *vmconfigs.MachineConfig, provider vmconfigs.VMProvid
 	cmd := gvproxy.NewGvproxyCommand()
 
 	// GvProxy PID file path is now derived
-	runDir := dirs.RuntimeDir
-	cmd.PidFile = filepath.Join(runDir.GetPath(), "gvproxy.pid")
+	gvproxyPIDFile, err := machine.GetGVProxyPIDFile(mc, dirs)
+	if err != nil {
+		return err
+	}
+	cmd.PidFile = gvproxyPIDFile.GetPath()
 
-	cmd.LogFile = filepath.Join(runDir.GetPath(), "gvproxy.log")
+	gvproxyLogFile, err := machine.GetGVProxyLogFile(mc, dirs)
+	if err != nil {
+		return err
+	}
+	cmd.LogFile = gvproxyLogFile.GetPath()
 
 	cmd.SSHPort = mc.SSH.Port
 
@@ -68,8 +75,17 @@ func startHostForwarder(mc *vmconfigs.MachineConfig, provider vmconfigs.VMProvid
 		cmd.AddForwardUser(forwardUser)
 		cmd.AddForwardIdentity(mc.SSH.IdentityPath)
 	}
-	serviceEndpoint := filepath.Join(runDir.GetPath(), "gv.sock")
-	cmd.AddServiceEndpoint(fmt.Sprintf("unix://%s", serviceEndpoint))
+
+	// add REST API services endpoint
+	serviceSocketPath, err := mc.GVProxyServiceSocket()
+	if err != nil {
+		return err
+	}
+	serviceEndpoint, err := sockets.ToUnixURL(serviceSocketPath)
+	if err != nil {
+		return err
+	}
+	cmd.AddServiceEndpoint(serviceEndpoint.String())
 
 	if logrus.IsLevelEnabled(logrus.DebugLevel) {
 		cmd.Debug = true
@@ -94,7 +110,9 @@ func startHostForwarder(mc *vmconfigs.MachineConfig, provider vmconfigs.VMProvid
 
 func startNetworking(mc *vmconfigs.MachineConfig, provider vmconfigs.VMProvider) (string, machine.APIForwardingState, error) {
 	// Check if SSH port is in use, and reassign if necessary
-	if !ports.IsLocalPortAvailable(mc.SSH.Port) {
+	// The specific WSL check covers a known issue with mirrored mode
+	// because the VM shares the same host network stack. (https://github.com/crc-org/macadam/issues/289)
+	if (provider.VMType() == define.WSLVirt || provider.UserModeNetworkEnabled(mc)) && !ports.IsLocalPortAvailable(mc.SSH.Port) {
 		logrus.Warnf("detected port conflict on machine ssh port [%d], reassigning", mc.SSH.Port)
 		if err := reassignSSHPort(mc, provider); err != nil {
 			return "", 0, err
@@ -102,7 +120,7 @@ func startNetworking(mc *vmconfigs.MachineConfig, provider vmconfigs.VMProvider)
 	}
 
 	// Provider has its own networking code path (e.g. WSL)
-	if provider.UseProviderNetworkSetup() {
+	if provider.UseProviderNetworkSetup(mc) {
 		return "", 0, provider.StartNetworking(mc, nil)
 	}
 
@@ -134,7 +152,7 @@ func startNetworking(mc *vmconfigs.MachineConfig, provider vmconfigs.VMProvider)
 // conductVMReadinessCheck checks to make sure the machine is in the proper state
 // and that SSH is up and running
 func conductVMReadinessCheck(mc *vmconfigs.MachineConfig, maxBackoffs int, backoff time.Duration, stateF func() (define.Status, error)) (connected bool, sshError error, err error) {
-	for i := 0; i < maxBackoffs; i++ {
+	for i := range maxBackoffs {
 		if i > 0 {
 			time.Sleep(backoff)
 			backoff *= 2
@@ -147,7 +165,8 @@ func conductVMReadinessCheck(mc *vmconfigs.MachineConfig, maxBackoffs int, backo
 			sshError = ErrNotRunning
 			continue
 		}
-		if !isListening(mc.SSH.Port) {
+		address := mc.GetAddress()
+		if !isListening(address, mc.SSH.Port) {
 			sshError = ErrSSHNotListening
 			continue
 		}
@@ -160,7 +179,7 @@ func conductVMReadinessCheck(mc *vmconfigs.MachineConfig, maxBackoffs int, backo
 		// CoreOS users have reported the same observation but
 		// the underlying source of the issue remains unknown.
 
-		if sshError = machine.CommonSSHSilent(mc.SSH.RemoteUsername, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, []string{"true"}); sshError != nil {
+		if sshError = machine.LocalhostSSHSilentWithAddress(mc.SSH.RemoteUsername, mc.SSH.IdentityPath, mc.Name, address, mc.SSH.Port, []string{"true"}); sshError != nil {
 			logrus.Debugf("SSH readiness check for machine failed: %v", sshError)
 			continue
 		}
@@ -203,8 +222,10 @@ func reassignSSHPort(mc *vmconfigs.MachineConfig, provider vmconfigs.VMProvider)
 	}
 
 	mc.SSH.Port = newPort
-	if err := connection.UpdateConnectionPairPort(mc.Name, newPort, mc.HostUser.UID, mc.SSH.RemoteUsername, mc.SSH.IdentityPath); err != nil {
-		return fmt.Errorf("could not update remote connection configuration: %w", err)
+	if mc.Capabilities.GetForwardSockets() {
+		if err := connection.UpdateConnectionPairPort(mc.Name, newPort, mc.HostUser.UID, mc.SSH.RemoteUsername, mc.SSH.IdentityPath); err != nil {
+			return fmt.Errorf("could not update remote connection configuration: %w", err)
+		}
 	}
 
 	// Write updated port back
@@ -218,9 +239,9 @@ func reassignSSHPort(mc *vmconfigs.MachineConfig, provider vmconfigs.VMProvider)
 	return nil
 }
 
-func isListening(port int) bool {
+func isListening(address string, port int) bool {
 	// Check if we can dial it
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", "127.0.0.1", port), 10*time.Millisecond)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", address, port), 10*time.Millisecond)
 	if err != nil {
 		return false
 	}

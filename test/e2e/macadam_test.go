@@ -22,8 +22,13 @@ type MacadamExecOptions struct {
 }
 
 func getMacadamBinary(cwd string) string {
-	macadamBinary := filepath.Join(cwd, "..", "..", "bin", fmt.Sprintf("macadam-%s-%s", runtime.GOOS, runtime.GOARCH))
-	return macadamBinary
+	if MACADAM_BINARY == "" {
+		macadamBinary := filepath.Join(cwd, "..", "..", "bin", fmt.Sprintf("macadam-%s-%s", runtime.GOOS, runtime.GOARCH))
+		return macadamBinary
+	} else {
+		return MACADAM_BINARY
+	}
+
 }
 
 // MacadamTestCreate creates a MacadamTestIntegration instance for the tests

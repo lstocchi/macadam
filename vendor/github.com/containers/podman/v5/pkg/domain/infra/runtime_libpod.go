@@ -13,16 +13,16 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/containers/common/pkg/cgroups"
 	"github.com/containers/podman/v5/libpod"
 	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/containers/podman/v5/pkg/namespaces"
 	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/containers/podman/v5/pkg/util"
-	"github.com/containers/storage/pkg/idtools"
-	"github.com/containers/storage/types"
 	"github.com/sirupsen/logrus"
 	flag "github.com/spf13/pflag"
+	"go.podman.io/common/pkg/cgroups"
+	"go.podman.io/storage/pkg/idtools"
+	"go.podman.io/storage/types"
 )
 
 var (
@@ -210,6 +210,10 @@ func getRuntime(ctx context.Context, fs *flag.FlagSet, opts *engineOpts) (*libpo
 
 	if fs.Changed("db-backend") {
 		options = append(options, libpod.WithDatabaseBackend(cfg.ContainersConf.Engine.DBBackend))
+	}
+
+	if cfg.CdiSpecDirs != nil {
+		options = append(options, libpod.WithCDISpecDirs(cfg.CdiSpecDirs))
 	}
 
 	if cfg.Syslog {

@@ -238,8 +238,8 @@ func setContainerNameForTemplate(startCommand []string, info *containerInfo) ([]
 			break
 		}
 	}
-	switch {
-	case nameIx == -1:
+	switch nameIx {
+	case -1:
 		// if not found, add --name argument in the command slice before the "run" argument.
 		// it's assumed that the command slice contains this argument.
 		runIx := -1
@@ -358,7 +358,7 @@ func executeContainerTemplate(info *containerInfo, options entities.GenerateSyst
 		remainingCmd := info.CreateCommand[index:]
 		// Presence check for certain flags/options.
 		fs := pflag.NewFlagSet("args", pflag.ContinueOnError)
-		fs.ParseErrorsWhitelist.UnknownFlags = true
+		fs.ParseErrorsAllowlist.UnknownFlags = true
 		fs.Usage = func() {}
 		fs.SetInterspersed(false)
 		fs.BoolP("detach", "d", false, "")

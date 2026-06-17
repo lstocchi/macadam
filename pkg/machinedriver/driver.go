@@ -18,19 +18,19 @@ package macadam
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 
-	"github.com/containers/common/pkg/strongunits"
 	"github.com/containers/podman/v5/pkg/machine"
 	"github.com/containers/podman/v5/pkg/machine/define"
 	"github.com/containers/podman/v5/pkg/machine/env"
-	provider2 "github.com/containers/podman/v5/pkg/machine/provider"
 	"github.com/containers/podman/v5/pkg/machine/shim"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/crc-org/machine/libmachine/drivers"
 	"github.com/crc-org/machine/libmachine/state"
+	"go.podman.io/common/pkg/strongunits"
 )
 
 const (
@@ -60,46 +60,14 @@ type Driver struct {
 	vmProvider vmconfigs.VMProvider
 }
 
-func NewDriver(hostName, storePath string) *Driver {
-	// checks that macdriver.Driver implements the libmachine.Driver interface
-	var _ drivers.Driver = &Driver{}
-
-	provider, err := provider2.Get()
-	if err != nil {
-		return nil
-	}
-	return &Driver{
-		VMDriver: &drivers.VMDriver{
-			BaseDriver: &drivers.BaseDriver{
-				MachineName: hostName,
-				StorePath:   storePath,
-			},
-			CPU:    DefaultCPUs,
-			Memory: DefaultMemory,
-		},
-		// needed when loading a VM which was created before
-		// DaemonVsockPort was introduced
-		DaemonVsockPort: DaemonVsockPort,
-
-		vmProvider: provider,
-	}
-}
-
-// this func should return the driver by using the machineName
-func GetDriverByMachineName(machineName string) (*Driver, error) {
-	provider, err := provider2.Get()
+// this func should return the driver by using the provider and machineName
+func GetDriverByProviderAndMachineName(provider vmconfigs.VMProvider, machineName string) (*Driver, error) {
+	mc, _, err := shim.VMExists(machineName, []vmconfigs.VMProvider{provider})
 	if err != nil {
 		return nil, err
 	}
-
-	dirs, err := env.GetMachineDirs(provider.VMType())
-	if err != nil {
-		return nil, err
-	}
-
-	mc, err := vmconfigs.LoadMachineByName(machineName, dirs)
-	if err != nil {
-		return nil, err
+	if mc == nil {
+		return nil, fmt.Errorf("VM %q does not exist", machineName)
 	}
 
 	return &Driver{
@@ -175,31 +143,21 @@ func DefaultInitOpts(machineName string) *define.InitOptions {
 	initOpts.USBs = []string{}
 	initOpts.IgnitionPath = ""
 	initOpts.Rootful = false
-	userModeNetworking := false
-	initOpts.UserModeNetworking = &userModeNetworking
-	// user-mode networking
 
 	return &initOpts
 }
 
 func (d *Driver) initOpts() *define.InitOptions {
 	initOpts := DefaultInitOpts(d.MachineName)
-	initOpts.CPUS = uint64(d.VMDriver.CPU)
-	initOpts.DiskSize = uint64(strongunits.ToGiB(strongunits.B(d.VMDriver.DiskCapacity)))
-	initOpts.Memory = uint64(d.VMDriver.Memory)
+	initOpts.CPUS = uint64(d.CPU)
+	initOpts.DiskSize = uint64(strongunits.ToGiB(strongunits.B(d.DiskCapacity)))
+	initOpts.Memory = uint64(d.Memory)
 	initOpts.Image = d.getDiskPath()
 
 	return initOpts
 }
 
 func (d *Driver) Reload() error {
-	if d.vmProvider == nil {
-		provider, err := provider2.Get()
-		if err != nil {
-			return err
-		}
-		d.vmProvider = provider
-	}
 	vmConfig, _, err := shim.VMExists(d.MachineName, []vmconfigs.VMProvider{d.vmProvider})
 	if err != nil {
 		return err
@@ -244,10 +202,7 @@ func (d *Driver) Create() error {
 	*/
 
 	initOpts := d.initOpts()
-	crcPuller, err := NewCrcImagePuller(d.vmProvider.VMType())
-	if err != nil {
-		return nil
-	}
+	crcPuller := NewCrcImagePuller(d.vmProvider.VMType())
 	crcPuller.SetSourceURI(d.ImageSourcePath)
 	initOpts.ImagePuller = crcPuller
 
@@ -303,6 +258,8 @@ func Start(vmConfig *vmconfigs.MachineConfig, vmProvider vmconfigs.VMProvider) e
 	fmt.Printf("Starting machine %q\n", machineName)
 
 	startOpts := machine.StartOptions{
+		// The running the e2e tests on ubuntu require slightly more time for ssh to come up
+		MaxBackoffs: 10,
 		// The ForwardSockets capabilities roughly indicates if we have a podman machine or a generic VM.
 		// For generic VMs, we don’t want to print these `info` messages as they are podman-centric.
 		NoInfo: !vmConfig.Capabilities.GetForwardSockets(),
@@ -513,11 +470,12 @@ func (d *Driver) RemoveWithOptions(opts machine.RemoveOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := shim.Stop(d.vmConfig, d.vmProvider, dirs, true); err != nil {
-		return err
-	}
 
 	if err := shim.Remove(d.vmConfig, d.vmProvider, dirs, opts); err != nil {
+		/* don’t print anything if the user cancelled the removal */
+		if errors.Is(err, shim.ErrRemoveUserCancelled) {
+			return nil
+		}
 		return err
 	}
 	//newMachineEvent(events.Remove, events.Event{Name: vmName})
@@ -640,7 +598,7 @@ func List(vmstubbers []vmconfigs.VMProvider) ([]*Driver, error) {
 			return nil, err
 		}
 		for name := range mcs {
-			driver, err := GetDriverByMachineName(name)
+			driver, err := GetDriverByProviderAndMachineName(s, name)
 			if err != nil {
 				return nil, err
 			}

@@ -13,18 +13,19 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/containers/buildah/define"
 	"github.com/containers/buildah/pkg/parse"
 	"github.com/containers/buildah/pkg/util"
-	"github.com/containers/common/pkg/auth"
-	"github.com/containers/image/v5/docker/reference"
-	"github.com/containers/image/v5/types"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/auth"
+	"go.podman.io/image/v5/docker/reference"
+	"go.podman.io/image/v5/types"
 )
 
 type BuildOptions struct {
@@ -68,10 +69,8 @@ func GenBuildOptions(c *cobra.Command, inputArgs []string, iopts BuildOptions) (
 			tags = tags[1:]
 		}
 		if c.Flag("manifest").Changed {
-			for _, tag := range tags {
-				if tag == iopts.Manifest {
-					return options, nil, nil, errors.New("the same name must not be specified for both '--tag' and '--manifest'")
-				}
+			if slices.Contains(tags, iopts.Manifest) {
+				return options, nil, nil, errors.New("the same name must not be specified for both '--tag' and '--manifest'")
 			}
 		}
 	}
@@ -259,18 +258,30 @@ func GenBuildOptions(c *cobra.Command, inputArgs []string, iopts BuildOptions) (
 			return options, nil, nil, err
 		}
 	}
-	var timestamp *time.Time
+	var timestamp, sourceDateEpoch *time.Time
 	if c.Flag("timestamp").Changed {
 		t := time.Unix(iopts.Timestamp, 0).UTC()
 		timestamp = &t
 	}
-	if c.Flag("output").Changed {
-		buildOption, err := parse.GetBuildOutput(iopts.BuildOutput)
+	if iopts.SourceDateEpoch != "" {
+		u, err := strconv.ParseInt(iopts.SourceDateEpoch, 10, 64)
 		if err != nil {
-			return options, nil, nil, err
+			return options, nil, nil, fmt.Errorf("error parsing source-date-epoch offset %q: %w", iopts.SourceDateEpoch, err)
 		}
-		if buildOption.IsStdout {
-			iopts.Quiet = true
+		s := time.Unix(u, 0).UTC()
+		sourceDateEpoch = &s
+	}
+	if c.Flag("output").Changed {
+		for _, buildOutput := range iopts.BuildOutputs {
+			// if any of these go to stdout, we need to avoid
+			// interspersing our random output in with it
+			buildOption, err := parse.GetBuildOutput(buildOutput)
+			if err != nil {
+				return options, nil, nil, err
+			}
+			if buildOption.IsStdout {
+				iopts.Quiet = true
+			}
 		}
 	}
 	var confidentialWorkloadOptions define.ConfidentialWorkloadOptions
@@ -344,6 +355,23 @@ func GenBuildOptions(c *cobra.Command, inputArgs []string, iopts BuildOptions) (
 		sbomScanOptions = append(sbomScanOptions, *sbomScanOption)
 	}
 
+	var compatVolumes, createdAnnotation, inheritAnnotations, inheritLabels, skipUnusedStages types.OptionalBool
+	if c.Flag("compat-volumes").Changed {
+		compatVolumes = types.NewOptionalBool(iopts.CompatVolumes)
+	}
+	if c.Flag("created-annotation").Changed {
+		createdAnnotation = types.NewOptionalBool(iopts.CreatedAnnotation)
+	}
+	if c.Flag("inherit-annotations").Changed {
+		inheritAnnotations = types.NewOptionalBool(iopts.InheritAnnotations)
+	}
+	if c.Flag("inherit-labels").Changed {
+		inheritLabels = types.NewOptionalBool(iopts.InheritLabels)
+	}
+	if c.Flag("skip-unused-stages").Changed {
+		skipUnusedStages = types.NewOptionalBool(iopts.SkipUnusedStages)
+	}
+
 	options = define.BuildOptions{
 		AddCapabilities:         iopts.CapAdd,
 		AdditionalBuildContexts: additionalBuildContext,
@@ -353,20 +381,21 @@ func GenBuildOptions(c *cobra.Command, inputArgs []string, iopts BuildOptions) (
 		Architecture:            systemContext.ArchitectureChoice,
 		Args:                    args,
 		BlobDirectory:           iopts.BlobCache,
-		BuildOutput:             iopts.BuildOutput,
+		BuildOutputs:            iopts.BuildOutputs,
 		CacheFrom:               cacheFrom,
 		CacheTo:                 cacheTo,
 		CacheTTL:                cacheTTL,
 		CDIConfigDir:            iopts.CDIConfigDir,
 		CNIConfigDir:            iopts.CNIConfigDir,
 		CNIPluginPath:           iopts.CNIPlugInPath,
-		CompatVolumes:           types.NewOptionalBool(iopts.CompatVolumes),
+		CompatVolumes:           compatVolumes,
 		ConfidentialWorkload:    confidentialWorkloadOptions,
 		CPPFlags:                iopts.CPPFlags,
 		CommonBuildOpts:         commonOpts,
 		Compression:             compression,
 		ConfigureNetwork:        networkPolicy,
 		ContextDirectory:        contextDir,
+		CreatedAnnotation:       createdAnnotation,
 		Devices:                 iopts.Devices,
 		DropCapabilities:        iopts.CapDrop,
 		Err:                     stderr,
@@ -378,6 +407,8 @@ func GenBuildOptions(c *cobra.Command, inputArgs []string, iopts BuildOptions) (
 		IIDFile:                 iopts.Iidfile,
 		IgnoreFile:              iopts.IgnoreFile,
 		In:                      stdin,
+		InheritLabels:           inheritLabels,
+		InheritAnnotations:      inheritAnnotations,
 		Isolation:               isolation,
 		Jobs:                    &iopts.Jobs,
 		Labels:                  iopts.Label,
@@ -402,13 +433,15 @@ func GenBuildOptions(c *cobra.Command, inputArgs []string, iopts BuildOptions) (
 		Quiet:                   iopts.Quiet,
 		RemoveIntermediateCtrs:  iopts.Rm,
 		ReportWriter:            reporter,
+		RewriteTimestamp:        iopts.RewriteTimestamp,
 		Runtime:                 iopts.Runtime,
 		RuntimeArgs:             runtimeFlags,
 		RusageLogFile:           iopts.RusageLogFile,
 		SBOMScanOptions:         sbomScanOptions,
 		SignBy:                  iopts.SignBy,
 		SignaturePolicyPath:     iopts.SignaturePolicy,
-		SkipUnusedStages:        types.NewOptionalBool(iopts.SkipUnusedStages),
+		SkipUnusedStages:        skipUnusedStages,
+		SourceDateEpoch:         sourceDateEpoch,
 		Squash:                  iopts.Squash,
 		SystemContext:           systemContext,
 		Target:                  iopts.Target,
@@ -416,6 +449,7 @@ func GenBuildOptions(c *cobra.Command, inputArgs []string, iopts BuildOptions) (
 		TransientMounts:         iopts.Volumes,
 		UnsetEnvs:               iopts.UnsetEnvs,
 		UnsetLabels:             iopts.UnsetLabels,
+		UnsetAnnotations:        iopts.UnsetAnnotations,
 	}
 	if iopts.RetryDelay != "" {
 		options.PullPushRetryDelay, err = time.ParseDuration(iopts.RetryDelay)
@@ -440,7 +474,7 @@ func readBuildArgFile(buildargfile string, args map[string]string) error {
 	if err != nil {
 		return err
 	}
-	for _, arg := range strings.Split(string(argfile), "\n") {
+	for arg := range strings.SplitSeq(string(argfile), "\n") {
 		if len(arg) == 0 || arg[0] == '#' {
 			continue
 		}

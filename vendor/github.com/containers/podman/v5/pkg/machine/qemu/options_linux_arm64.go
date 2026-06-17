@@ -5,12 +5,10 @@ package qemu
 import (
 	"path/filepath"
 
-	"github.com/containers/storage/pkg/fileutils"
+	"go.podman.io/storage/pkg/fileutils"
 )
 
-var (
-	QemuCommand = "qemu-system-aarch64"
-)
+var qemuCommand = []string{"qemu-system-aarch64", "qemu-kvm"}
 
 func (q *QEMUStubber) addArchOptions(_ *setNewMachineCMDOpts) []string {
 	opts := []string{

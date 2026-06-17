@@ -27,7 +27,10 @@ func registeredBinfmtMisc() ([]string, error) {
 		if filepath.Base(path) == "register" { // skip this one
 			return nil
 		}
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
 		info, err := d.Info()
@@ -143,7 +146,7 @@ func parseBinfmtMisc(path string, r io.Reader) (int, []byte, []byte, error) {
 			maskString = fields[1]
 		case "flags", "flags:":
 			if len(fields) != 2 {
-				return -1, nil, nil, fmt.Errorf("invalid format for %q in %q", text, path)
+				continue
 			}
 			if !strings.Contains(fields[1], "F") { // won't work in other mount namespaces, so ignore it
 				return -1, nil, nil, nil

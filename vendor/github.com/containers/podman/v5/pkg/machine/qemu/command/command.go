@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/storage/pkg/fileutils"
+	"go.podman.io/storage/pkg/fileutils"
 )
 
 // defaultQMPTimeout is the timeout duration for the
@@ -79,20 +79,29 @@ func (q *QemuCmd) SetUSBHostPassthrough(usbs []define.USBConfig) {
 }
 
 // SetSerialPort adds a serial port to the machine for readiness
-func (q *QemuCmd) SetSerialPort(readySocket, vmPidFile define.VMFile, name string) {
+func (q *QemuCmd) SetSerialPort(readySocket define.VMFile, name string) {
 	*q = append(*q,
 		"-device", "virtio-serial",
 		// qemu needs to establish the long name; other connections can use the symlink'd
 		// Note both id and chardev start with an extra "a" because qemu requires that it
 		// starts with a letter but users can also use numbers
 		"-chardev", "socket,path="+readySocket.GetPath()+",server=on,wait=off,id=a"+name+"_ready",
-		"-device", "virtserialport,chardev=a"+name+"_ready"+",name=org.fedoraproject.port.0",
-		"-pidfile", vmPidFile.GetPath())
+		"-device", "virtserialport,chardev=a"+name+"_ready"+",name=org.fedoraproject.port.0")
+}
+
+// SetPidFile sets the path where to write QEMU PID
+func (q *QemuCmd) SetPidFile(vmPidFile define.VMFile) {
+	*q = append(*q, "-pidfile", vmPidFile.GetPath())
 }
 
 // SetBootableImage specifies the image the machine will use to boot
 func (q *QemuCmd) SetBootableImage(image string) {
 	*q = append(*q, "-drive", "if=virtio,file="+image)
+}
+
+// SetISOImage specifies the image the machine will use to boot
+func (q *QemuCmd) SetISOImage(image string) {
+	*q = append(*q, "-drive", "if=virtio,media=cdrom,format=raw,file="+image)
 }
 
 // SetDisplay specifies whether the machine will have a display
@@ -116,7 +125,7 @@ type Monitor struct {
 // NewQMPMonitor creates the monitor subsection of our vm
 func NewQMPMonitor(name string, machineRuntimeDir *define.VMFile) (Monitor, error) {
 	if err := fileutils.Exists(machineRuntimeDir.GetPath()); errors.Is(err, fs.ErrNotExist) {
-		if err := os.MkdirAll(machineRuntimeDir.GetPath(), 0755); err != nil {
+		if err := os.MkdirAll(machineRuntimeDir.GetPath(), 0o755); err != nil {
 			return Monitor{}, err
 		}
 	}

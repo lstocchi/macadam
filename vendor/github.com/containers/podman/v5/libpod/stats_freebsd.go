@@ -9,8 +9,9 @@ import (
 
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/rctl"
-	"github.com/containers/storage/pkg/system"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/storage/pkg/system"
+	"golang.org/x/sys/unix"
 )
 
 // getPlatformContainerStats gets the platform-specific running stats
@@ -35,7 +36,7 @@ func (c *Container) getPlatformContainerStats(stats *define.ContainerStats, prev
 	// in a new jail
 	if dur, ok := entries["wallclock"]; ok {
 		if previousStats.Duration > dur*1000000000 {
-			previousStats = &define.ContainerStats{}
+			previousStats = &define.ContainerStats{} //nolint:wastedassign // TODO: figure this out.
 		}
 	}
 
@@ -98,7 +99,6 @@ func (c *Container) getMemLimit() uint64 {
 		return 0
 	}
 
-	//nolint:unconvert
 	physicalLimit := uint64(mi.MemTotal)
 
 	if memLimit <= 0 || memLimit > physicalLimit {
@@ -128,5 +128,9 @@ func calculateCPUPercent(currentCPU, previousCPU, now, previousSystem uint64) fl
 }
 
 func getOnlineCPUs(container *Container) (int, error) {
-	return 0, nil
+	if container.state.State != define.ContainerStateRunning {
+		return -1, fmt.Errorf("container %s is not running: %w", container.ID(), define.ErrCtrStopped)
+	}
+	n, err := unix.SysctlUint32("hw.ncpu")
+	return int(n), err
 }

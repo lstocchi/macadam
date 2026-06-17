@@ -20,10 +20,10 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
-	"github.com/containers/storage/pkg/regexp"
 	"github.com/openshift/imagebuilder/internal"
 	"github.com/openshift/imagebuilder/signal"
 	"github.com/openshift/imagebuilder/strslice"
+	"go.podman.io/storage/pkg/regexp"
 
 	buildkitcommand "github.com/moby/buildkit/frontend/dockerfile/command"
 	buildkitparser "github.com/moby/buildkit/frontend/dockerfile/parser"
@@ -41,18 +41,11 @@ var builtinArgDefaults = map[string]string{
 	"TARGETPLATFORM": localspec.OS + "/" + localspec.Architecture,
 	"TARGETOS":       localspec.OS,
 	"TARGETARCH":     localspec.Architecture,
-	"TARGETVARIANT":  localspec.Variant,
+	"TARGETVARIANT":  "",
 	"BUILDPLATFORM":  localspec.OS + "/" + localspec.Architecture,
 	"BUILDOS":        localspec.OS,
 	"BUILDARCH":      localspec.Architecture,
-	"BUILDVARIANT":   localspec.Variant,
-}
-
-func init() {
-	if localspec.Variant != "" {
-		builtinArgDefaults["TARGETPLATFORM"] = builtinArgDefaults["TARGETPLATFORM"] + "/" + localspec.Variant
-		builtinArgDefaults["BUILDPLATFORM"] = builtinArgDefaults["BUILDPLATFORM"] + "/" + localspec.Variant
-	}
+	"BUILDVARIANT":   "",
 }
 
 // ENV foo bar
@@ -569,12 +562,12 @@ func expose(b *Builder, args []string, attributes map[string]bool, flagArgs []st
 
 	existing := map[string]struct{}{}
 	for k := range b.RunConfig.ExposedPorts {
-		existing[k.Port()] = struct{}{}
+		existing[k.Port()+"/"+k.Proto()] = struct{}{}
 	}
 
 	for _, port := range args {
 		dp := docker.Port(port)
-		if _, exists := existing[dp.Port()]; !exists {
+		if _, exists := existing[dp.Port()+"/"+dp.Proto()]; !exists {
 			b.RunConfig.ExposedPorts[docker.Port(fmt.Sprintf("%s/%s", dp.Port(), dp.Proto()))] = struct{}{}
 		}
 	}

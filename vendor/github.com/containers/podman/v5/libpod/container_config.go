@@ -6,14 +6,14 @@ import (
 	"net"
 	"time"
 
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/secrets"
-	"github.com/containers/image/v5/manifest"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/namespaces"
 	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/storage"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/secrets"
+	"go.podman.io/image/v5/manifest"
+	"go.podman.io/storage"
 )
 
 // ContainerConfig contains all information that was used to create the
@@ -76,7 +76,7 @@ type ContainerConfig struct {
 	// namespace. They are used by the OCI runtime when creating the
 	// container, and by c/storage to ensure that the container's files have
 	// the appropriate owner.
-	IDMappings storage.IDMappingOptions `json:"idMappingsOptions,omitempty"`
+	IDMappings storage.IDMappingOptions `json:"idMappingsOptions"`
 
 	// Dependencies are the IDs of dependency containers.
 	// These containers must be started before this container is started.
@@ -162,6 +162,8 @@ type ContainerRootFSConfig struct {
 	// moved out of Libpod into pkg/specgen).
 	// Please DO NOT reuse the `imageVolumes` name in container JSON again.
 	ImageVolumes []*ContainerImageVolume `json:"ctrImageVolumes,omitempty"`
+	// ArtifactVolumes lists the artifact volumes to mount into the container.
+	ArtifactVolumes []*ContainerArtifactVolume `json:"artifactVolumes,omitempty"`
 	// CreateWorkingDir indicates that Libpod should create the container's
 	// working directory if it does not exist. Some OCI runtimes do this by
 	// default, but others do not.
@@ -376,7 +378,7 @@ type ContainerMiscConfig struct {
 	LogPath string `json:"logPath"`
 	// LogTag is the tag used for logging
 	LogTag string `json:"logTag"`
-	// LogSize is the tag used for logging
+	// LogSize is the maximum size of the container's log file
 	LogSize int64 `json:"logSize"`
 	// LogDriver driver for logs
 	LogDriver string `json:"logDriver"`
@@ -402,6 +404,9 @@ type ContainerMiscConfig struct {
 	// IsInfra is a bool indicating whether this container is an infra container used for
 	// sharing kernel namespaces in a pod
 	IsInfra bool `json:"pause"`
+	// IsDefaultInfra is a bool indicating whether this container is a default infra container
+	// using the default rootfs with catatonit bind-mounted into it.
+	IsDefaultInfra bool `json:"defaultPause"`
 	// IsService is a bool indicating whether this container is a service container used for
 	// tracking the life cycle of K8s service.
 	IsService bool `json:"isService"`

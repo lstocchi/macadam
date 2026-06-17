@@ -4,13 +4,13 @@ import (
 	"encoding/json"
 	"os"
 
-	"github.com/crc-org/macadam/test/osprovider"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
 )
 
 type ListReporter struct {
+	Name           string
 	Image          string
 	Created        string
 	Running        bool
@@ -39,31 +39,20 @@ var _ = Describe("Macadam", func() {
 		os.RemoveAll(tempDir)
 	})
 
-	It("creates a new CentOS VM, starts it, ssh in and cleans", func() {
+	It("creates a new CentOS VM, starts it, ssh in and cleans", Label("linux", "darwin"), func() {
 		// verify there is no vm
-		var machineResponses []ListReporter
-		session := macadamTest.Macadam([]string{"list"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(gexec.Exit())
-		list := session.OutputToString()
-		Expect(list).Should(Equal(""))
-
-		// download CentOS image
-		centosProvider := osprovider.NewCentosProvider()
-		image, err := centosProvider.Fetch(tempDir)
-		Expect(err).NotTo(HaveOccurred())
+		noVMcheck()
 
 		// init a CentOS VM
-		session = macadamTest.Macadam([]string{"init", image})
+		session := macadamTest.Macadam([]string{"init", IMAGE})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(gexec.Exit())
 
 		// check the list command returns one item
-		session = macadamTest.Macadam([]string{"list"})
+		session = macadamTest.Macadam([]string{"list", "--format", "json"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(gexec.Exit())
-		list = session.OutputToString()
-		err = json.Unmarshal([]byte(list), &machineResponses)
+		err = json.Unmarshal(session.Out.Contents(), &machineResponses)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(len(machineResponses)).Should(Equal(1))
 
@@ -90,11 +79,12 @@ var _ = Describe("Macadam", func() {
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(gexec.Exit())
 
-		session = macadamTest.Macadam([]string{"list"})
+		session = macadamTest.Macadam([]string{"list", "--format", "json"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(gexec.Exit())
-		list = session.OutputToString()
-		Expect(list).Should(Equal(""))
+		err = json.Unmarshal(session.Out.Contents(), &machineResponses)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(len(machineResponses)).Should(Equal(0))
 	})
 
 })

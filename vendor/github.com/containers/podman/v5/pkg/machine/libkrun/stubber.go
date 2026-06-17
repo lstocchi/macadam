@@ -22,6 +22,10 @@ const (
 	localhostURI  = "http://localhost"
 )
 
+var (
+	exclusiveActive = true
+)
+
 type LibKrunStubber struct {
 	vmconfigs.AppleHVConfig
 }
@@ -30,7 +34,7 @@ func (l *LibKrunStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.Machin
 	mc.LibKrunHypervisor = new(vmconfigs.LibKrunConfig)
 	mc.LibKrunHypervisor.KRun = vfkit.Helper{}
 
-	bl := vfConfig.NewEFIBootloader(fmt.Sprintf("%s/efi-bl-%s", opts.Dirs.DataDir.GetPath(), opts.Name), true)
+	bl := vfConfig.NewEFIBootloader(apple.EfiVarsPath(opts.Dirs.DataDir, opts.Name), true)
 	mc.LibKrunHypervisor.KRun.VirtualMachine = vfConfig.NewVirtualMachine(uint(mc.Resources.CPUs), uint64(mc.Resources.Memory), bl)
 
 	randPort, err := utils.GetRandomPort()
@@ -39,43 +43,45 @@ func (l *LibKrunStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.Machin
 	}
 	mc.LibKrunHypervisor.KRun.Endpoint = localhostURI + ":" + strconv.Itoa(randPort)
 
-	virtiofsMounts := make([]machine.VirtIoFs, 0, len(mc.Mounts))
-	for _, mnt := range mc.Mounts {
-		virtiofsMounts = append(virtiofsMounts, machine.MountToVirtIOFs(mnt))
-	}
+	if builder != nil {
+		virtiofsMounts := make([]machine.VirtIoFs, 0, len(mc.Mounts))
+		for _, mnt := range mc.Mounts {
+			virtiofsMounts = append(virtiofsMounts, machine.MountToVirtIOFs(mnt))
+		}
 
-	// Populate the ignition file with virtiofs stuff
-	virtIOIgnitionMounts, err := apple.GenerateSystemDFilesForVirtiofsMounts(virtiofsMounts)
-	if err != nil {
-		return err
+		// Populate the ignition file with virtiofs stuff
+		virtIOIgnitionMounts, err := apple.GenerateSystemDFilesForVirtiofsMounts(virtiofsMounts)
+		if err != nil {
+			return err
+		}
+		builder.WithUnit(virtIOIgnitionMounts...)
 	}
-	builder.WithUnit(virtIOIgnitionMounts...)
 
 	return apple.ResizeDisk(mc, mc.Resources.DiskSize)
 }
 
-func (l *LibKrunStubber) PrepareIgnition(mc *vmconfigs.MachineConfig, ignBuilder *ignition.IgnitionBuilder) (*ignition.ReadyUnitOpts, error) {
+func (l *LibKrunStubber) PrepareIgnition(_ *vmconfigs.MachineConfig, _ *ignition.IgnitionBuilder) (*ignition.ReadyUnitOpts, error) {
 	return nil, nil
 }
 
-func (l *LibKrunStubber) Exists(name string) (bool, error) {
+func (l *LibKrunStubber) Exists(_ string) (*bool, error) {
 	// not applicable for libkrun (same as applehv)
-	return false, nil
+	return nil, nil
 }
 
 func (l *LibKrunStubber) MountType() vmconfigs.VolumeMountType {
 	return vmconfigs.VirtIOFS
 }
 
-func (l *LibKrunStubber) MountVolumesToVM(mc *vmconfigs.MachineConfig, quiet bool) error {
+func (l *LibKrunStubber) MountVolumesToVM(_ *vmconfigs.MachineConfig, _ bool) error {
 	return nil
 }
 
 func (l *LibKrunStubber) Remove(mc *vmconfigs.MachineConfig) ([]string, func() error, error) {
-	return []string{}, func() error { return nil }, nil
+	return apple.Remove(mc)
 }
 
-func (l *LibKrunStubber) RemoveAndCleanMachines(dirs *define.MachineDirs) error {
+func (l *LibKrunStubber) RemoveAndCleanMachines(_ *define.MachineDirs) error {
 	return nil
 }
 
@@ -91,7 +97,7 @@ func (l *LibKrunStubber) StartNetworking(mc *vmconfigs.MachineConfig, cmd *gvpro
 	return apple.StartGenericNetworking(mc, cmd)
 }
 
-func (l *LibKrunStubber) PostStartNetworking(mc *vmconfigs.MachineConfig, noInfo bool) error {
+func (l *LibKrunStubber) PostStartNetworking(_ *vmconfigs.MachineConfig, _ bool) error {
 	return nil
 }
 
@@ -103,7 +109,7 @@ func (l *LibKrunStubber) StartVM(mc *vmconfigs.MachineConfig) (func() error, fun
 	return apple.StartGenericAppleVM(mc, krunkitBinary, bl, mc.LibKrunHypervisor.KRun.Endpoint)
 }
 
-func (l *LibKrunStubber) State(mc *vmconfigs.MachineConfig, bypass bool) (define.Status, error) {
+func (l *LibKrunStubber) State(mc *vmconfigs.MachineConfig, _ bool) (define.Status, error) {
 	return mc.LibKrunHypervisor.KRun.State()
 }
 
@@ -111,7 +117,7 @@ func (l *LibKrunStubber) StopVM(mc *vmconfigs.MachineConfig, hardStop bool) erro
 	return mc.LibKrunHypervisor.KRun.Stop(hardStop, true)
 }
 
-func (l *LibKrunStubber) StopHostNetworking(mc *vmconfigs.MachineConfig, vmType define.VMType) error {
+func (l *LibKrunStubber) StopHostNetworking(_ *vmconfigs.MachineConfig, _ define.VMType) error {
 	return nil
 }
 
@@ -119,22 +125,26 @@ func (l *LibKrunStubber) VMType() define.VMType {
 	return define.LibKrun
 }
 
-func (l *LibKrunStubber) UserModeNetworkEnabled(mc *vmconfigs.MachineConfig) bool {
+func (l *LibKrunStubber) UserModeNetworkEnabled(_ *vmconfigs.MachineConfig) bool {
 	return true
 }
 
-func (l *LibKrunStubber) UseProviderNetworkSetup() bool {
+func (l *LibKrunStubber) UseProviderNetworkSetup(_ *vmconfigs.MachineConfig) bool {
 	return false
 }
 
-func (l *LibKrunStubber) RequireExclusiveActive() bool {
-	return true
+func (l *LibKrunStubber) SetExclusiveActive(exclusive bool) {
+	exclusiveActive = exclusive
 }
 
-func (l *LibKrunStubber) UpdateSSHPort(mc *vmconfigs.MachineConfig, port int) error {
+func (l *LibKrunStubber) RequireExclusiveActive() bool {
+	return exclusiveActive
+}
+
+func (l *LibKrunStubber) UpdateSSHPort(_ *vmconfigs.MachineConfig, _ int) error {
 	return nil
 }
 
-func (l *LibKrunStubber) GetRosetta(mc *vmconfigs.MachineConfig) (bool, error) {
+func (l *LibKrunStubber) GetRosetta(_ *vmconfigs.MachineConfig) (bool, error) {
 	return false, nil
 }

@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"io"
 
-	"github.com/containers/common/libnetwork/types"
+	"go.podman.io/common/libnetwork/types"
 )
 
 var (
@@ -18,7 +18,7 @@ var (
 	// constant, but Go won't let us do that.
 	NameRegex = types.NameRegex
 	// RegexError is thrown in presence of an invalid container/pod name.
-	RegexError = types.RegexError
+	RegexError = types.ErrInvalidName
 )
 
 const (
@@ -30,7 +30,7 @@ const (
 // InfoData holds the info type, i.e store, host etc and the data for each type
 type InfoData struct {
 	Type string
-	Data map[string]interface{}
+	Data map[string]any
 }
 
 // VolumeDriverLocal is the "local" volume driver. It is managed by libpod

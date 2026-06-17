@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand"
 	"os"
 	"reflect"
@@ -15,8 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/config"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/containers/podman/v5/pkg/env"
@@ -30,6 +29,8 @@ import (
 	"github.com/containers/podman/v5/pkg/util"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/config"
 )
 
 // GenerateForKube takes a slice of libpod containers and generates
@@ -119,9 +120,9 @@ func (p *Pod) getInfraContainer() (*Container, error) {
 	return p.runtime.GetContainer(infraID)
 }
 
-func GenerateForKubeDaemonSet(ctx context.Context, pod *YAMLPod, options entities.GenerateKubeOptions) (*YAMLDaemonSet, error) {
+func GenerateForKubeDaemonSet(_ context.Context, pod *YAMLPod, options entities.GenerateKubeOptions) (*YAMLDaemonSet, error) {
 	// Restart policy for DaemonSets can only be set to Always
-	if !(pod.Spec.RestartPolicy == "" || pod.Spec.RestartPolicy == v1.RestartPolicyAlways) {
+	if pod.Spec.RestartPolicy != "" && pod.Spec.RestartPolicy != v1.RestartPolicyAlways {
 		return nil, fmt.Errorf("k8s DaemonSets can only have restartPolicy set to Always")
 	}
 
@@ -176,9 +177,9 @@ func GenerateForKubeDaemonSet(ctx context.Context, pod *YAMLPod, options entitie
 
 // GenerateForKubeDeployment returns a YAMLDeployment from a YAMLPod that is then used to create a kubernetes Deployment
 // kind YAML.
-func GenerateForKubeDeployment(ctx context.Context, pod *YAMLPod, options entities.GenerateKubeOptions) (*YAMLDeployment, error) {
+func GenerateForKubeDeployment(_ context.Context, pod *YAMLPod, options entities.GenerateKubeOptions) (*YAMLDeployment, error) {
 	// Restart policy for Deployments can only be set to Always
-	if options.Type == define.K8sKindDeployment && !(pod.Spec.RestartPolicy == "" || pod.Spec.RestartPolicy == v1.RestartPolicyAlways) {
+	if options.Type == define.K8sKindDeployment && (pod.Spec.RestartPolicy != "" && pod.Spec.RestartPolicy != v1.RestartPolicyAlways) {
 		return nil, fmt.Errorf("k8s Deployments can only have restartPolicy set to Always")
 	}
 
@@ -235,7 +236,7 @@ func GenerateForKubeDeployment(ctx context.Context, pod *YAMLPod, options entiti
 
 // GenerateForKubeJob returns a YAMLDeployment from a YAMLPod that is then used to create a kubernetes Job
 // kind YAML.
-func GenerateForKubeJob(ctx context.Context, pod *YAMLPod, options entities.GenerateKubeOptions) (*YAMLJob, error) {
+func GenerateForKubeJob(_ context.Context, pod *YAMLPod, options entities.GenerateKubeOptions) (*YAMLJob, error) {
 	// Restart policy for Job cannot be set to Always
 	if options.Type == define.K8sKindJob && pod.Spec.RestartPolicy == v1.RestartPolicyAlways {
 		return nil, fmt.Errorf("k8s Jobs can not have restartPolicy set to Always; only Never and OnFailure policies allowed")
@@ -620,9 +621,7 @@ func (p *Pod) podWithContainers(ctx context.Context, containers []*Container, po
 				podAnnotations[fmt.Sprintf("%s/%s", k, removeUnderscores(ctr.Name()))] = v
 			}
 			// Convert auto-update labels into kube annotations
-			for k, v := range getAutoUpdateAnnotations(ctr.Name(), ctr.Labels()) {
-				podAnnotations[k] = v
-			}
+			maps.Copy(podAnnotations, getAutoUpdateAnnotations(ctr.Name(), ctr.Labels()))
 			isInit := ctr.IsInitCtr()
 			// Since hostname is only set at pod level, set the hostname to the hostname of the first container we encounter
 			if hostname == "" {
@@ -769,9 +768,7 @@ func simplePodWithV1Containers(ctx context.Context, ctrs []*Container, getServic
 		}
 
 		// Convert auto-update labels into kube annotations
-		for k, v := range getAutoUpdateAnnotations(ctr.Name(), ctr.Labels()) {
-			kubeAnnotations[k] = v
-		}
+		maps.Copy(kubeAnnotations, getAutoUpdateAnnotations(ctr.Name(), ctr.Labels()))
 
 		isInit := ctr.IsInitCtr()
 		// Since hostname is only set at pod level, set the hostname to the hostname of the first container we encounter
@@ -815,7 +812,7 @@ func simplePodWithV1Containers(ctx context.Context, ctrs []*Container, getServic
 		if !ctr.HostNetwork() {
 			hostNetwork = false
 		}
-		if !(ctr.IDMappings().HostUIDMapping && ctr.IDMappings().HostGIDMapping) {
+		if !ctr.IDMappings().HostUIDMapping || !ctr.IDMappings().HostGIDMapping {
 			hostUsers = false
 		}
 		kubeCtr, kubeVols, ctrDNS, annotations, err := containerToV1Container(ctx, ctr, getService)
@@ -925,6 +922,10 @@ func containerToV1Container(ctx context.Context, c *Container, getService bool) 
 		return kubeContainer, kubeVolumes, nil, annotations, fmt.Errorf("linux devices: %w", define.ErrNotImplemented)
 	}
 
+	if !c.IsInfra() && len(c.config.Rootfs) > 0 {
+		return kubeContainer, kubeVolumes, nil, annotations, fmt.Errorf("k8s does not support Rootfs")
+	}
+
 	if len(c.config.UserVolumes) > 0 {
 		volumeMounts, volumes, localAnnotations, err := libpodMountsToKubeVolumeMounts(c)
 		if err != nil {
@@ -957,53 +958,44 @@ func containerToV1Container(ctx context.Context, c *Container, getService bool) 
 	kubeContainer.Name = removeUnderscores(c.Name())
 	_, image := c.Image()
 
-	// The infra container may have been created with an overlay root FS
-	// instead of an infra image.  If so, set the imageto the default K8s
-	// pause one and make sure it's in the storage by pulling it down if
-	// missing.
-	if image == "" && c.IsInfra() {
-		image = c.runtime.config.Engine.InfraImage
-		if _, err := c.runtime.libimageRuntime.Pull(ctx, image, config.PullPolicyMissing, nil); err != nil {
-			return kubeContainer, nil, nil, nil, err
-		}
-	}
-
 	kubeContainer.Image = image
 	kubeContainer.Stdin = c.Stdin()
-	img, _, err := c.runtime.libimageRuntime.LookupImage(image, nil)
-	if err != nil {
-		return kubeContainer, kubeVolumes, nil, annotations, fmt.Errorf("looking up image %q of container %q: %w", image, c.ID(), err)
-	}
-	imgData, err := img.Inspect(ctx, nil)
-	if err != nil {
-		return kubeContainer, kubeVolumes, nil, annotations, err
-	}
-	// If the user doesn't set a command/entrypoint when creating the container with podman and
-	// is using the image command or entrypoint from the image, don't add it to the generated kube yaml
-	if reflect.DeepEqual(imgData.Config.Cmd, kubeContainer.Command) || reflect.DeepEqual(imgData.Config.Entrypoint, kubeContainer.Command) {
-		kubeContainer.Command = nil
-	}
+	if len(image) > 0 {
+		img, _, err := c.runtime.libimageRuntime.LookupImage(image, nil)
+		if err != nil {
+			return kubeContainer, kubeVolumes, nil, annotations, fmt.Errorf("looking up image %q of container %q: %w", image, c.ID(), err)
+		}
+		imgData, err := img.Inspect(ctx, nil)
+		if err != nil {
+			return kubeContainer, kubeVolumes, nil, annotations, err
+		}
+		// If the user doesn't set a command/entrypoint when creating the container with podman and
+		// is using the image command or entrypoint from the image, don't add it to the generated kube yaml
+		if reflect.DeepEqual(imgData.Config.Cmd, kubeContainer.Command) || reflect.DeepEqual(imgData.Config.Entrypoint, kubeContainer.Command) {
+			kubeContainer.Command = nil
+		}
 
-	if c.WorkingDir() != "/" && imgData.Config.WorkingDir != c.WorkingDir() {
-		kubeContainer.WorkingDir = c.WorkingDir()
-	}
+		if c.WorkingDir() != "/" && imgData.Config.WorkingDir != c.WorkingDir() {
+			kubeContainer.WorkingDir = c.WorkingDir()
+		}
 
-	if imgData.User == c.User() && hasSecData {
-		kubeSec.RunAsGroup, kubeSec.RunAsUser = nil, nil
-	}
-	// If the image has user set as a positive integer value, then set runAsNonRoot to true
-	// in the kube yaml
-	imgUserID, err := strconv.Atoi(imgData.User)
-	if err == nil && imgUserID > 0 {
-		trueBool := true
-		kubeSec.RunAsNonRoot = &trueBool
-	}
+		if imgData.User == c.User() && hasSecData {
+			kubeSec.RunAsGroup, kubeSec.RunAsUser = nil, nil
+		}
+		// If the image has user set as a positive integer value, then set runAsNonRoot to true
+		// in the kube yaml
+		imgUserID, err := strconv.Atoi(imgData.User)
+		if err == nil && imgUserID > 0 {
+			trueBool := true
+			kubeSec.RunAsNonRoot = &trueBool
+		}
 
-	envVariables, err := libpodEnvVarsToKubeEnvVars(c.config.Spec.Process.Env, imgData.Config.Env)
-	if err != nil {
-		return kubeContainer, kubeVolumes, nil, annotations, err
+		envVariables, err := libpodEnvVarsToKubeEnvVars(c.config.Spec.Process.Env, imgData.Config.Env)
+		if err != nil {
+			return kubeContainer, kubeVolumes, nil, annotations, err
+		}
+		kubeContainer.Env = envVariables
 	}
-	kubeContainer.Env = envVariables
 
 	kubeContainer.Ports = ports
 	// This should not be applicable
@@ -1089,8 +1081,7 @@ func containerToV1Container(ctx context.Context, c *Container, getService bool) 
 func portMappingToContainerPort(portMappings []types.PortMapping, getService bool) ([]v1.ContainerPort, error) {
 	containerPorts := make([]v1.ContainerPort, 0, len(portMappings))
 	for _, p := range portMappings {
-		protocols := strings.Split(p.Protocol, ",")
-		for _, proto := range protocols {
+		for proto := range strings.SplitSeq(p.Protocol, ",") {
 			var protocol v1.Protocol
 			switch strings.ToUpper(proto) {
 			case "TCP":
@@ -1195,6 +1186,7 @@ func generateKubePersistentVolumeClaim(v *ContainerNamedVolume) (v1.VolumeMount,
 	vm.Name = name
 	vm.MountPath = v.Dest
 	vm.ReadOnly = ro
+	vm.SubPath = v.SubPath
 
 	pvc := v1.PersistentVolumeClaimVolumeSource{ClaimName: vName, ReadOnly: ro}
 	vs := v1.VolumeSource{}
@@ -1364,7 +1356,7 @@ func generateKubeSecurityContext(c *Container) (*v1.SecurityContext, bool, error
 	}
 	var selinuxOpts v1.SELinuxOptions
 	selinuxHasData := false
-	for _, label := range strings.Split(c.config.Spec.Annotations[define.InspectAnnotationLabel], ",label=") {
+	for label := range strings.SplitSeq(c.config.Spec.Annotations[define.InspectAnnotationLabel], ",label=") {
 		opt, val, hasVal := strings.Cut(label, ":")
 		if hasVal {
 			switch opt {

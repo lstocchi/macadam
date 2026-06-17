@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -826,33 +827,39 @@ func (f *UnitFile) LookupAllArgs(groupName string, key string) []string {
 // array of words. The split code is exec-like, and both unquotes and
 // applied c-style c escapes.  This is typically used for keys like
 // ExecStart
-func (f *UnitFile) LookupLastArgs(groupName string, key string) ([]string, bool) {
+func (f *UnitFile) LookupLastArgs(groupName string, key string) ([]string, bool, error) {
 	execKey, ok := f.LookupLast(groupName, key)
-	if ok {
-		execArgs, err := splitString(execKey, WhitespaceSeparators, SplitRelax|SplitUnquote|SplitCUnescape)
-		if err == nil {
-			return execArgs, true
-		}
+	if !ok {
+		return nil, false, nil
 	}
-	return nil, false
+	execArgs, err := splitString(execKey, WhitespaceSeparators, SplitRelax|SplitUnquote|SplitCUnescape)
+	if err != nil {
+		return nil, false, err
+	}
+	return execArgs, true, nil
 }
 
 // Look up 'Environment' style key-value keys
-func (f *UnitFile) LookupAllKeyVal(groupName string, key string) map[string]string {
-	res := make(map[string]string)
+func (f *UnitFile) LookupAllKeyVal(groupName string, key string) (map[string]*string, error) {
+	var warnings error
+	res := make(map[string]*string)
 	allKeyvals := f.LookupAll(groupName, key)
 	for _, keyvals := range allKeyvals {
 		assigns, err := splitString(keyvals, WhitespaceSeparators, SplitRelax|SplitUnquote|SplitCUnescape)
-		if err == nil {
-			for _, assign := range assigns {
-				key, value, found := strings.Cut(assign, "=")
-				if found {
-					res[key] = value
-				}
+		if err != nil {
+			warnings = errors.Join(warnings, err)
+			continue
+		}
+		for _, assign := range assigns {
+			key, value, found := strings.Cut(assign, "=")
+			if found {
+				res[key] = &value
+			} else {
+				res[key] = nil
 			}
 		}
 	}
-	return res
+	return res, warnings
 }
 
 func (f *UnitFile) Set(groupName string, key string, value string) {

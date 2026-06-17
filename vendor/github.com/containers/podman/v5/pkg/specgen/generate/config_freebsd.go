@@ -11,14 +11,16 @@ import (
 
 	"github.com/opencontainers/runtime-tools/generate"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/config"
 	"golang.org/x/sys/unix"
 	"tags.cncf.io/container-device-interface/pkg/cdi"
 )
 
 // DevicesFromPath computes a list of devices
-func DevicesFromPath(g *generate.Generator, devicePath string) error {
+func DevicesFromPath(g *generate.Generator, devicePath string, config *config.Config) error {
 	if isCDIDevice(devicePath) {
 		registry, err := cdi.NewCache(
+			cdi.WithSpecDirs(config.Engine.CdiSpecDirs.Get()...),
 			cdi.WithAutoRefresh(false),
 		)
 		if err != nil {
@@ -46,7 +48,9 @@ func DevicesFromPath(g *generate.Generator, devicePath string) error {
 	}
 	if st.IsDir() {
 		// For devfs, we need to add the directory as well
-		addDevice(g, resolvedDevicePath)
+		if err := addDevice(g, resolvedDevicePath); err != nil {
+			return err
+		}
 
 		found := false
 		src := resolvedDevicePath
@@ -67,7 +71,7 @@ func DevicesFromPath(g *generate.Generator, devicePath string) error {
 		}
 
 		// mount the internal devices recursively
-		if err := filepath.WalkDir(resolvedDevicePath, func(dpath string, d fs.DirEntry, e error) error {
+		if err := filepath.WalkDir(resolvedDevicePath, func(dpath string, d fs.DirEntry, _ error) error {
 			if d.Type()&os.ModeDevice == os.ModeDevice {
 				found = true
 				device := fmt.Sprintf("%s:%s", dpath, filepath.Join(dest, strings.TrimPrefix(dpath, src)))

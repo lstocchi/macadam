@@ -9,12 +9,13 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/strongunits"
 	gvproxy "github.com/containers/gvisor-tap-vsock/pkg/types"
+	"github.com/containers/podman/v5/pkg/errorhandling"
 	"github.com/containers/podman/v5/pkg/machine"
 	"github.com/containers/podman/v5/pkg/machine/cloudinit"
 	"github.com/containers/podman/v5/pkg/machine/define"
@@ -24,6 +25,8 @@ import (
 	"github.com/containers/podman/v5/pkg/systemd/parser"
 	vfConfig "github.com/crc-org/vfkit/pkg/config"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/strongunits"
 )
 
 const applehvMACAddress = "5a:94:ef:e4:0c:ee"
@@ -79,7 +82,7 @@ func GenerateSystemDFilesForVirtiofsMounts(mounts []machine.VirtIoFs) ([]ignitio
 		mountUnit.Add("Mount", "Where", "%s")
 		mountUnit.Add("Mount", "Type", "virtiofs")
 		mountUnit.Add("Mount", "Options", fmt.Sprintf("context=\"%s\"", machine.NFSSELinuxContext))
-		mountUnit.Add("Install", "WantedBy", "multi-user.target")
+		mountUnit.Add("Install", "WantedBy", "local-fs.target")
 		mountUnitFile, err := mountUnit.ToString()
 		if err != nil {
 			return nil, err
@@ -103,7 +106,7 @@ func GenerateSystemDFilesForVirtiofsMounts(mounts []machine.VirtIoFs) ([]ignitio
 	immutableRootOff.Add("Service", "Type", "oneshot")
 	immutableRootOff.Add("Service", "ExecStart", "chattr -i /")
 
-	immutableRootOff.Add("Install", "WantedBy", "remote-fs-pre.target")
+	immutableRootOff.Add("Install", "WantedBy", "local-fs-pre.target")
 	immutableRootOffFile, err := immutableRootOff.ToString()
 	if err != nil {
 		return nil, err
@@ -119,12 +122,12 @@ func GenerateSystemDFilesForVirtiofsMounts(mounts []machine.VirtIoFs) ([]ignitio
 	immutableRootOn := parser.NewUnitFile()
 	immutableRootOn.Add("Unit", "Description", "Set / back to immutable after mounts are done")
 	immutableRootOn.Add("Unit", "DefaultDependencies", "no")
-	immutableRootOn.Add("Unit", "After", "remote-fs.target")
+	immutableRootOn.Add("Unit", "After", "local-fs.target")
 
 	immutableRootOn.Add("Service", "Type", "oneshot")
 	immutableRootOn.Add("Service", "ExecStart", "chattr +i /")
 
-	immutableRootOn.Add("Install", "WantedBy", "remote-fs.target")
+	immutableRootOn.Add("Install", "WantedBy", "local-fs.target")
 	immutableRootOnFile, err := immutableRootOn.ToString()
 	if err != nil {
 		return nil, err
@@ -208,11 +211,6 @@ func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootload
 
 	cmd.Args = append(cmd.Args, endpointArgs...)
 
-	firstBoot, err := mc.IsFirstBoot()
-	if err != nil {
-		return nil, nil, err
-	}
-
 	if logrus.IsLevelEnabled(logrus.DebugLevel) {
 		debugDevArgs, err := GetDebugDevicesCMDArgs()
 		if err != nil {
@@ -222,7 +220,14 @@ func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootload
 		cmd.Args = append(cmd.Args, "--gui") // add command line switch to pop the gui open
 	}
 
-	if firstBoot {
+	if mc.LibKrunHypervisor != nil {
+		// Nested Virtualization requires an M3 chip or newer, and to be running
+		// macOS 15+. If those requirements are not met, then krunkit will ignore the
+		// argument and keep Nested Virtualization disabled.
+		cmd.Args = append(cmd.Args, "--nested")
+	}
+
+	if mc.IsFirstBoot() {
 		var firstBootCli []string
 		if mc.CloudInit {
 			firstBootCli, err = getFirstBootAppleVMCloudInit(mc)
@@ -267,7 +272,7 @@ func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootload
 		if err != nil {
 			return nil, nil, err
 		}
-		err = os.Chmod(kdFile.Path, 0744)
+		err = os.Chmod(kdFile.Path, 0o744)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -277,7 +282,7 @@ func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootload
 			return nil, nil, err
 		}
 		for _, arg := range cmd.Args {
-			_, err = f.WriteString(fmt.Sprintf("%q ", arg))
+			_, err = fmt.Fprintf(f, "%q ", arg)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -332,6 +337,15 @@ func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootload
 	return cmd.Process.Release, returnFunc, nil
 }
 
+func ignitionSocket(dataDir *define.VMFile, name string) (*define.VMFile, error) {
+	socketName := fmt.Sprintf("%s-%s", name, ignitionSocketName)
+	return dataDir.AppendToNewVMFile(socketName, &socketName)
+}
+
+func EfiVarsPath(dataDir *define.VMFile, name string) string {
+	return filepath.Join(dataDir.GetPath(), "efi-bl-"+name)
+}
+
 func getFirstBootAppleVMIgnition(mc *vmconfigs.MachineConfig) ([]string, error) {
 	machineDataDir, err := mc.DataDir()
 	if err != nil {
@@ -340,8 +354,7 @@ func getFirstBootAppleVMIgnition(mc *vmconfigs.MachineConfig) ([]string, error) 
 
 	// If this is the first boot of the vm, we need to add the vsock
 	// device to vfkit so we can inject the ignition file
-	socketName := fmt.Sprintf("%s-%s", mc.Name, ignitionSocketName)
-	ignitionSocket, err := machineDataDir.AppendToNewVMFile(socketName, &socketName)
+	ignitionSocket, err := ignitionSocket(machineDataDir, mc.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -366,13 +379,31 @@ func getFirstBootAppleVMIgnition(mc *vmconfigs.MachineConfig) ([]string, error) 
 }
 
 func getFirstBootAppleVMCloudInit(mc *vmconfigs.MachineConfig) ([]string, error) {
-	// we generate the user-data file
-	userDataFile, err := cloudinit.GenerateUserDataFile(mc)
-	if err != nil {
-		return nil, err
-	}
+	if mc.LibKrunHypervisor == nil {
+		// Always call GenerateUserDataFile
+		// if the user provided a custom user-data file, we use it and
+		// add additional data like mounts
+		// otherwise we generate a default user-data file
+		userDataFile, err := cloudinit.GenerateUserDataFile(mc)
+		if err != nil {
+			return nil, err
+		}
+		cloudInitArgs := []string{userDataFile}
 
-	return []string{"--cloud-init", userDataFile}, nil
+		if mc.CloudInitConfig.MetaData != nil {
+			cloudInitArgs = append(cloudInitArgs, mc.CloudInitConfig.MetaData.GetPath())
+		}
+		if mc.CloudInitConfig.NetworkConfig != nil {
+			cloudInitArgs = append(cloudInitArgs, mc.CloudInitConfig.NetworkConfig.GetPath())
+		}
+		return []string{"--cloud-init", strings.Join(cloudInitArgs, ",")}, nil
+	} else {
+		cloudinitISO, err := cloudinit.GenerateISO(mc)
+		if err != nil {
+			return nil, err
+		}
+		return []string{"--device", fmt.Sprintf("virtio-blk,path=%s", cloudinitISO.GetPath())}, nil
+	}
 }
 
 // CheckProcessRunning checks non blocking if the pid exited
@@ -408,4 +439,50 @@ func StartGenericNetworking(mc *vmconfigs.MachineConfig, cmd *gvproxy.GvproxyCom
 	}
 	cmd.AddVfkitSocket(fmt.Sprintf("unixgram://%s", gvProxySock.GetPath()))
 	return nil
+}
+
+func Remove(mc *vmconfigs.MachineConfig) ([]string, func() error, error) {
+	dataDir, err := mc.DataDir()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	rmFiles := []string{}
+
+	efiVarsPath := EfiVarsPath(dataDir, mc.Name)
+	rmFiles = append(rmFiles, efiVarsPath)
+
+	ignitionSocket, err := ignitionSocket(dataDir, mc.Name)
+	if err == nil {
+		rmFiles = append(rmFiles, ignitionSocket.GetPath())
+	}
+
+	cloudinitISO, err := cloudinit.GetCloudInitISOVMFile(mc)
+	if err == nil {
+		rmFiles = append(rmFiles, cloudinitISO.GetPath())
+	}
+
+	rmFunc := func() error {
+		var errs []error
+
+		if err := os.Remove(efiVarsPath); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, err)
+		}
+
+		if ignitionSocket != nil {
+			if err := ignitionSocket.Delete(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+
+		if cloudinitISO != nil {
+			if err := cloudinitISO.Delete(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+
+		return errorhandling.JoinErrors(errs)
+	}
+
+	return rmFiles, rmFunc, nil
 }

@@ -5,11 +5,15 @@ import (
 	"path/filepath"
 
 	"github.com/containers/podman/v5/pkg/machine/env"
-	"github.com/containers/storage/pkg/lockfile"
+	"go.podman.io/storage/pkg/lockfile"
 )
 
+func GetMachineLockPath(name string, machineConfigDir string) string {
+	return filepath.Join(machineConfigDir, name+".lock")
+}
+
 func GetMachineLock(name string, machineConfigDir string) (*lockfile.LockFile, error) {
-	lockPath := filepath.Join(machineConfigDir, name+".lock")
+	lockPath := GetMachineLockPath(name, machineConfigDir)
 	lock, err := lockfile.GetLockFile(lockPath)
 	if err != nil {
 		return nil, fmt.Errorf("creating lockfile for VM: %w", err)

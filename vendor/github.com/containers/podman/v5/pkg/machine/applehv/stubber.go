@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"strconv"
 
-	"github.com/containers/common/pkg/config"
 	gvproxy "github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/containers/podman/v5/pkg/machine"
 	"github.com/containers/podman/v5/pkg/machine/apple"
@@ -17,13 +16,15 @@ import (
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/containers/podman/v5/utils"
 	vfConfig "github.com/crc-org/vfkit/pkg/config"
+	"go.podman.io/common/pkg/config"
 )
 
 // applehcMACAddress is a pre-defined mac address that vfkit recognizes
 // and is required for network flow
 
 var (
-	vfkitCommand = "vfkit"
+	vfkitCommand    = "vfkit"
+	exclusiveActive = true
 )
 
 type AppleHVStubber struct {
@@ -34,18 +35,22 @@ func (a *AppleHVStubber) UserModeNetworkEnabled(_ *vmconfigs.MachineConfig) bool
 	return true
 }
 
-func (a *AppleHVStubber) UseProviderNetworkSetup() bool {
+func (a *AppleHVStubber) UseProviderNetworkSetup(_ *vmconfigs.MachineConfig) bool {
 	return false
 }
 
+func (a *AppleHVStubber) SetExclusiveActive(exclusive bool) {
+	exclusiveActive = exclusive
+}
+
 func (a *AppleHVStubber) RequireExclusiveActive() bool {
-	return true
+	return exclusiveActive
 }
 
 func (a *AppleHVStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.MachineConfig, ignBuilder *ignition.IgnitionBuilder) error {
 	mc.AppleHypervisor = new(vmconfigs.AppleHVConfig)
 	mc.AppleHypervisor.Vfkit = vfkit.Helper{}
-	bl := vfConfig.NewEFIBootloader(fmt.Sprintf("%s/efi-bl-%s", opts.Dirs.DataDir.GetPath(), opts.Name), true)
+	bl := vfConfig.NewEFIBootloader(apple.EfiVarsPath(opts.Dirs.DataDir, opts.Name), true)
 	mc.AppleHypervisor.Vfkit.VirtualMachine = vfConfig.NewVirtualMachine(uint(mc.Resources.CPUs), uint64(mc.Resources.Memory), bl)
 
 	randPort, err := utils.GetRandomPort()
@@ -54,17 +59,19 @@ func (a *AppleHVStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.Machin
 	}
 	mc.AppleHypervisor.Vfkit.Endpoint = localhostURI + ":" + strconv.Itoa(randPort)
 
-	virtiofsMounts := make([]machine.VirtIoFs, 0, len(mc.Mounts))
-	for _, mnt := range mc.Mounts {
-		virtiofsMounts = append(virtiofsMounts, machine.MountToVirtIOFs(mnt))
-	}
+	if ignBuilder != nil {
+		virtiofsMounts := make([]machine.VirtIoFs, 0, len(mc.Mounts))
+		for _, mnt := range mc.Mounts {
+			virtiofsMounts = append(virtiofsMounts, machine.MountToVirtIOFs(mnt))
+		}
 
-	// Populate the ignition file with virtiofs stuff
-	virtIOIgnitionMounts, err := apple.GenerateSystemDFilesForVirtiofsMounts(virtiofsMounts)
-	if err != nil {
-		return err
+		// Populate the ignition file with virtiofs stuff
+		virtIOIgnitionMounts, err := apple.GenerateSystemDFilesForVirtiofsMounts(virtiofsMounts)
+		if err != nil {
+			return err
+		}
+		ignBuilder.WithUnit(virtIOIgnitionMounts...)
 	}
-	ignBuilder.WithUnit(virtIOIgnitionMounts...)
 
 	cfg, err := config.Default()
 	if err != nil {
@@ -79,9 +86,9 @@ func (a *AppleHVStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.Machin
 	return apple.ResizeDisk(mc, mc.Resources.DiskSize)
 }
 
-func (a *AppleHVStubber) Exists(name string) (bool, error) {
+func (a *AppleHVStubber) Exists(_ string) (*bool, error) {
 	// not applicable for applehv
-	return false, nil
+	return nil, nil
 }
 
 func (a *AppleHVStubber) MountType() vmconfigs.VolumeMountType {
@@ -134,7 +141,7 @@ func (a *AppleHVStubber) StopHostNetworking(_ *vmconfigs.MachineConfig, _ define
 	return nil
 }
 
-func (a *AppleHVStubber) UpdateSSHPort(mc *vmconfigs.MachineConfig, port int) error {
+func (a *AppleHVStubber) UpdateSSHPort(_ *vmconfigs.MachineConfig, _ int) error {
 	// managed by gvproxy on this backend, so nothing to do
 	return nil
 }
@@ -147,7 +154,7 @@ func (a *AppleHVStubber) PrepareIgnition(_ *vmconfigs.MachineConfig, _ *ignition
 	return nil, nil
 }
 
-func (a *AppleHVStubber) PostStartNetworking(mc *vmconfigs.MachineConfig, noInfo bool) error {
+func (a *AppleHVStubber) PostStartNetworking(_ *vmconfigs.MachineConfig, _ bool) error {
 	return nil
 }
 

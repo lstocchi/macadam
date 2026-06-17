@@ -15,7 +15,7 @@ import (
 )
 
 // NewPod makes a new, empty pod
-func (r *Runtime) NewPod(ctx context.Context, p specgen.PodSpecGenerator, options ...PodCreateOption) (_ *Pod, deferredErr error) {
+func (r *Runtime) NewPod(_ context.Context, p specgen.PodSpecGenerator, options ...PodCreateOption) (_ *Pod, deferredErr error) {
 	if !r.valid {
 		return nil, define.ErrRuntimeStopped
 	}
@@ -90,15 +90,11 @@ func (r *Runtime) NewPod(ctx context.Context, p specgen.PodSpecGenerator, option
 			break
 		}
 	}
-	if addPodErr != nil {
-		return nil, fmt.Errorf("adding pod to state: %w", addPodErr)
-	}
-
-	return pod, nil
+	return nil, fmt.Errorf("adding pod to state: %w", addPodErr)
 }
 
 // AddInfra adds the created infra container to the pod state
-func (r *Runtime) AddInfra(ctx context.Context, pod *Pod, infraCtr *Container) (*Pod, error) {
+func (r *Runtime) AddInfra(_ context.Context, pod *Pod, infraCtr *Container) (*Pod, error) {
 	if !r.valid {
 		return nil, define.ErrRuntimeStopped
 	}
@@ -215,8 +211,10 @@ func (r *Runtime) removePod(ctx context.Context, p *Pod, removeCtrs, force bool,
 		return nil, fmt.Errorf("pod %s contains containers and cannot be removed: %w", p.ID(), define.ErrCtrExists)
 	}
 
-	var removalErr error
-	ctrNamedVolumes := make(map[string]*ContainerNamedVolume)
+	var (
+		removalErr      error
+		ctrNamedVolumes map[string]*ContainerNamedVolume
+	)
 
 	// Build a graph of all containers in the pod.
 	graph, err := BuildContainerGraph(ctrs)
@@ -235,11 +233,14 @@ func (r *Runtime) removePod(ctx context.Context, p *Pod, removeCtrs, force bool,
 			return removedCtrs, err
 		}
 	} else {
-		ctrErrors := make(map[string]error)
-		ctrsVisited := make(map[string]bool)
+		var (
+			ctrErrors   map[string]error
+			ctrsVisited map[string]bool
+		)
 
-		for _, node := range graph.notDependedOnNodes {
-			removeNode(ctx, node, p, force, timeout, false, ctrErrors, ctrsVisited, ctrNamedVolumes)
+		ctrNamedVolumes, ctrsVisited, ctrErrors, err = removeContainerGraph(ctx, graph, p, timeout, force)
+		if err != nil {
+			return nil, err
 		}
 
 		// Finalize the removed containers list

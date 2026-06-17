@@ -10,25 +10,24 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/containers/image/v5/docker"
-	"github.com/containers/image/v5/docker/reference"
-	"github.com/containers/image/v5/transports/alltransports"
-	"github.com/containers/image/v5/types"
 	"github.com/containers/podman/v5/pkg/machine/compression"
 	"github.com/containers/podman/v5/pkg/machine/define"
 	"github.com/containers/podman/v5/utils"
-	crc "github.com/crc-org/crc/v2/pkg/os"
 	"github.com/opencontainers/go-digest"
 	specV1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/image/v5/docker"
+	"go.podman.io/image/v5/docker/reference"
+	"go.podman.io/image/v5/image"
+	"go.podman.io/image/v5/transports/alltransports"
+	"go.podman.io/image/v5/types"
 )
 
 const (
 	artifactRegistry     = "quay.io"
 	artifactRepo         = "podman"
 	artifactImageName    = "machine-os"
-	artifactImageNameWSL = "machine-os-wsl"
-	artifactOriginalName = "org.opencontainers.image.title"
+	artifactOriginalName = specV1.AnnotationTitle
 	machineOS            = "linux"
 )
 
@@ -72,10 +71,8 @@ type DiskArtifactOpts struct {
 
 */
 
-func NewOCIArtifactPull(ctx context.Context, dirs *define.MachineDirs, endpoint string, vmName string, vmType define.VMType, finalPath *define.VMFile) (*OCIArtifactDisk, error) {
-	var (
-		arch string
-	)
+func NewOCIArtifactPull(ctx context.Context, dirs *define.MachineDirs, endpoint string, vmName string, vmType define.VMType, finalPath *define.VMFile, skipTlsVerify types.OptionalBool) (*OCIArtifactDisk, error) {
+	var arch string
 
 	artifactVersion := getVersion()
 	switch runtime.GOARCH {
@@ -95,13 +92,7 @@ func NewOCIArtifactPull(ctx context.Context, dirs *define.MachineDirs, endpoint 
 
 	cache := false
 	if endpoint == "" {
-		// The OCI artifact containing the OS image for WSL has a different
-		// image name. This should be temporary and dropped as soon as the
-		// OS image for WSL is built from fedora-coreos too (c.f. RUN-2178).
 		imageName := artifactImageName
-		if vmType == define.WSLVirt {
-			imageName = artifactImageNameWSL
-		}
 		endpoint = fmt.Sprintf("docker://%s/%s/%s:%s", artifactRegistry, artifactRepo, imageName, artifactVersion.majorMinor())
 		cache = true
 	}
@@ -115,8 +106,10 @@ func NewOCIArtifactPull(ctx context.Context, dirs *define.MachineDirs, endpoint 
 		imageEndpoint:    endpoint,
 		machineVersion:   artifactVersion,
 		name:             vmName,
-		pullOptions:      &PullOptions{},
-		vmType:           vmType,
+		pullOptions: &PullOptions{
+			SkipTLSVerify: skipTlsVerify,
+		},
+		vmType: vmType,
 	}
 	return &ociDisk, nil
 }
@@ -224,7 +217,7 @@ func (o *OCIArtifactDisk) getDestArtifact() (types.ImageReference, digest.Digest
 	}
 	fmt.Printf("Looking up Podman Machine image at %s to create VM\n", imgRef.DockerReference())
 	sysCtx := &types.SystemContext{
-		DockerInsecureSkipTLSVerify: types.NewOptionalBool(!o.pullOptions.TLSVerify),
+		DockerInsecureSkipTLSVerify: o.pullOptions.SkipTLSVerify,
 	}
 	imgSrc, err := imgRef.NewImageSource(o.ctx, sysCtx)
 	if err != nil {
@@ -292,13 +285,8 @@ func (o *OCIArtifactDisk) unpack(diskArtifactHash digest.Digest) error {
 	diskBlobPath := filepath.Join(blobDir.GetPath(), "blobs", "sha256", blobInfo.Digest.Encoded())
 
 	// Rename and move the hashed blob file to the cache dir.
-	// If the rename fails, we do a sparsecopy instead
 	if err := os.Rename(diskBlobPath, cachedCompressedPath.GetPath()); err != nil {
-		logrus.Errorf("renaming compressed image %q failed: %q", cachedCompressedPath.GetPath(), err)
-		logrus.Error("trying again using copy")
-		if err := crc.CopyFileSparse(diskBlobPath, cachedCompressedPath.GetPath()); err != nil {
-			return err
-		}
+		return fmt.Errorf("failed to move downloaded blob to cache: %w", err)
 	}
 
 	// Clean up the oci dir which is no longer needed
@@ -310,7 +298,7 @@ func (o *OCIArtifactDisk) decompress() error {
 }
 
 func getOriginalFileName(ctx context.Context, imgSrc types.ImageSource, artifactDigest digest.Digest) (string, error) {
-	v1RawMannyfest, _, err := imgSrc.GetManifest(ctx, &artifactDigest)
+	v1RawMannyfest, _, err := image.UnparsedInstance(imgSrc, &artifactDigest).Manifest(ctx)
 	if err != nil {
 		return "", err
 	}

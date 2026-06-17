@@ -6,59 +6,14 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/containers/podman/v5/pkg/machine"
+	"github.com/containers/podman/v5/pkg/machine/define"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/kdomanski/iso9660"
 	"github.com/sirupsen/logrus"
-	"gopkg.in/yaml.v3"
 )
 
-type User struct {
-	Name    string   `yaml:"name"`
-	Sudo    string   `yaml:"sudo"`
-	Shell   string   `yaml:"shell"`
-	Groups  string   `yaml:"groups"`
-	SSHKeys []string `yaml:"ssh_authorized_keys"`
-}
-
-type UserData struct {
-	Users []User `yaml:"users"`
-}
-
-func GenerateUserData(mc *vmconfigs.MachineConfig) ([]byte, error) {
-	sshKey, err := machine.GetSSHKeys(mc.SSH.IdentityPath)
-	if err != nil {
-		return nil, err
-	}
-
-	userData := UserData{
-		Users: []User{
-			User{
-				Name:   mc.SSH.RemoteUsername,
-				Sudo:   "ALL=(ALL) NOPASSWD:ALL",
-				Shell:  "/bin/bash",
-				Groups: "users",
-				SSHKeys: []string{
-					sshKey,
-				},
-			},
-		},
-	}
-
-	yamlBytes, err := yaml.Marshal(&userData)
-	if err != nil {
-		logrus.Errorf("Error marshaling to YAML: %v", err)
-		return nil, err
-	}
-
-	headerLine := "#cloud-config\n"
-	yamlBytes = append([]byte(headerLine), yamlBytes...)
-
-	return yamlBytes, nil
-}
-
 func GenerateUserDataFile(mc *vmconfigs.MachineConfig) (string, error) {
-	yamlBytes, err := GenerateUserData(mc)
+	yamlBytes, err := generateUserData(mc)
 	if err != nil {
 		return "", err
 	}
@@ -80,10 +35,18 @@ func GenerateUserDataFile(mc *vmconfigs.MachineConfig) (string, error) {
 	return path, nil
 }
 
-func GenerateISO(mc *vmconfigs.MachineConfig) (string, error) {
+func GetCloudInitISOVMFile(mc *vmconfigs.MachineConfig) (*define.VMFile, error) {
+	machineDataDir, err := mc.DataDir()
+	if err != nil {
+		return nil, err
+	}
+	return machineDataDir.AppendToNewVMFile(fmt.Sprintf("%s-cloudinit.iso", mc.Name), nil)
+}
+
+func GenerateISO(mc *vmconfigs.MachineConfig) (*define.VMFile, error) {
 	writer, err := iso9660.NewWriter()
 	if err != nil {
-		return "", fmt.Errorf("failed to create writer: %w", err)
+		return nil, fmt.Errorf("failed to create writer: %w", err)
 	}
 
 	defer func() {
@@ -91,27 +54,53 @@ func GenerateISO(mc *vmconfigs.MachineConfig) (string, error) {
 			logrus.Error(err)
 		}
 	}()
-	userdata, err := GenerateUserData(mc)
+
+	metadata, networkConfig := []byte{}, []byte{}
+
+	userdata, err := generateUserData(mc)
 	if err != nil {
-		return "", nil
+		return nil, fmt.Errorf("failed to generate user-data file: %w", err)
 	}
+
+	if mc.CloudInitConfig.MetaData != nil {
+		metadata, err = mc.CloudInitConfig.MetaData.Read()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read meta-data file: %w", err)
+		}
+	}
+
+	if mc.CloudInitConfig.NetworkConfig != nil {
+		networkConfig, err = mc.CloudInitConfig.NetworkConfig.Read()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read network-config file: %w", err)
+		}
+	}
+
 	if err := writer.AddFile(bytes.NewReader(userdata), "user-data"); err != nil {
-		return "", err
+		return nil, err
 	}
-	if err := writer.AddFile(bytes.NewReader([]byte{}), "meta-data"); err != nil {
-		return "", err
+	if err := writer.AddFile(bytes.NewReader(metadata), "meta-data"); err != nil {
+		return nil, err
+	}
+	if err := writer.AddFile(bytes.NewReader(networkConfig), "network-config"); err != nil {
+		return nil, err
 	}
 
-	machineDataDir, err := mc.DataDir()
+	resources := GetEmbeddedResources(mc)
+	for _, res := range resources {
+		if err := writer.AddFile(bytes.NewReader(res.Content), res.Name); err != nil {
+			return nil, err
+		}
+	}
+
+	vmFile, err := GetCloudInitISOVMFile(mc)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	path := filepath.Join(machineDataDir.GetPath(), "cloudinit.iso")
-
-	isoFile, err := os.Create(path)
+	isoFile, err := os.Create(vmFile.GetPath())
 	if err != nil {
-		return "", fmt.Errorf("unable to create cloud-init ISO file: %w", err)
+		return nil, fmt.Errorf("unable to create cloud-init ISO file: %w", err)
 	}
 
 	defer func() {
@@ -123,8 +112,8 @@ func GenerateISO(mc *vmconfigs.MachineConfig) (string, error) {
 	err = writer.WriteTo(isoFile, "cidata")
 	if err != nil {
 		os.Remove(isoFile.Name())
-		return "", fmt.Errorf("failed to write cloud-init ISO image: %w", err)
+		return nil, fmt.Errorf("failed to write cloud-init ISO image: %w", err)
 	}
 
-	return isoFile.Name(), nil
+	return vmFile, nil
 }

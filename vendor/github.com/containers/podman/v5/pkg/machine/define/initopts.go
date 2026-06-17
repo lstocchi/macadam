@@ -1,6 +1,10 @@
 package define
 
-import "net/url"
+import (
+	"net/url"
+
+	"go.podman.io/image/v5/types"
+)
 
 type MachineCapabilities struct {
 	HasReadyUnit   bool
@@ -32,6 +36,7 @@ type InitOptions struct {
 	Volumes            []string
 	IsDefault          bool
 	Memory             uint64
+	Swap               uint64
 	Name               string
 	TimeZone           string
 	URI                url.URL
@@ -42,7 +47,9 @@ type InitOptions struct {
 	UID                string // uid of the user that called machine
 	UserModeNetworking *bool  // nil = use backend/system default, false = disable, true = enable
 	USBs               []string
+	SkipTlsVerify      types.OptionalBool
 	ImagePuller        ImagePuller
 	CloudInit          bool
 	Capabilities       *MachineCapabilities
+	CloudInitPaths     []string // user-data, meta-data and network-config cloud-init configuration file paths
 }

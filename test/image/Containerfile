@@ -1,0 +1,26 @@
+FROM registry.ci.openshift.org/openshift/release:rhel-9-release-golang-1.25-openshift-4.21 AS builder
+
+USER root
+
+ARG OS 
+ARG ARCH
+WORKDIR /workspace
+COPY . .
+RUN GOARCH=${ARCH} GOOS=${OS} make build_e2e \
+    && make bin/macadam-${OS}-${ARCH}
+
+FROM quay.io/rhqp/deliverest:v0.0.7
+
+LABEL org.opencontainers.image.authors="CRCQE <devtools-crc-qe@redhat.com>"
+
+ARG OS 
+ARG ARCH
+
+ENV ASSETS_FOLDER=/opt/macadam \
+    OS=${OS} \
+    ARCH=${ARCH}
+
+COPY --from=builder /workspace/bin/macadam-${OS}-${ARCH}* ${ASSETS_FOLDER}/bin/macadam
+COPY --from=builder /workspace/bin/${OS}-${ARCH} ${ASSETS_FOLDER}/bin/
+COPY --from=builder /workspace/test/testdata ${ASSETS_FOLDER}/testdata
+COPY test/image/lib/${OS}/* ${ASSETS_FOLDER}/

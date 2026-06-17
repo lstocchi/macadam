@@ -3,11 +3,11 @@ package vmconfigs
 import (
 	"time"
 
-	"github.com/containers/common/pkg/strongunits"
 	gvproxy "github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/containers/podman/v5/pkg/machine/define"
 	"github.com/containers/podman/v5/pkg/machine/ignition"
-	"github.com/containers/storage/pkg/lockfile"
+	"go.podman.io/common/pkg/strongunits"
+	"go.podman.io/storage/pkg/lockfile"
 )
 
 const MachineConfigVersion = 1
@@ -27,8 +27,7 @@ type MachineConfig struct {
 	SSH       SSHConfig
 	Version   uint
 
-	// Image stuff
-	imageDescription machineImage //nolint:unused
+	Swap strongunits.MiB
 
 	ImagePath *define.VMFile // Temporary only until a proper image struct is worked out
 
@@ -39,7 +38,7 @@ type MachineConfig struct {
 	QEMUHypervisor    *QEMUConfig    `json:",omitempty"`
 	WSLHypervisor     *WSLConfig     `json:",omitempty"`
 
-	lock *lockfile.LockFile //nolint:unused
+	lock *lockfile.LockFile
 
 	// configPath can be used for reading, writing, removing
 	configPath *define.VMFile
@@ -58,34 +57,21 @@ type MachineConfig struct {
 
 	CloudInit    bool
 	Capabilities *define.MachineCapabilities
+	IPAddress    string
+	// user-data, meta-data and network-config cloud-init configuration files
+	CloudInitConfig CloudInitConfig
 }
 
-type machineImage interface { //nolint:unused
-	download() error
-	path() string
-}
-
-type OCIMachineImage struct {
-	// registry
-	// TODO JSON serial/deserial will write string to disk
-	// but in code it is a types.ImageReference
-
-	// quay.io/podman/podman-machine-image:5.0
-	FQImageReference string
-}
-
-func (o OCIMachineImage) path() string {
-	return ""
-}
-
-func (o OCIMachineImage) download() error {
-	return nil
+type CloudInitConfig struct {
+	UserData      *define.VMFile
+	MetaData      *define.VMFile
+	NetworkConfig *define.VMFile
 }
 
 type VMProvider interface { //nolint:interfacebloat
 	CreateVM(opts define.CreateVMOpts, mc *MachineConfig, builder *ignition.IgnitionBuilder) error
 	PrepareIgnition(mc *MachineConfig, ignBuilder *ignition.IgnitionBuilder) (*ignition.ReadyUnitOpts, error)
-	Exists(name string) (bool, error)
+	Exists(name string) (*bool, error)
 	MountType() VolumeMountType
 	MountVolumesToVM(mc *MachineConfig, quiet bool) error
 	Remove(mc *MachineConfig) ([]string, func() error, error)
@@ -99,7 +85,8 @@ type VMProvider interface { //nolint:interfacebloat
 	StopHostNetworking(mc *MachineConfig, vmType define.VMType) error
 	VMType() define.VMType
 	UserModeNetworkEnabled(mc *MachineConfig) bool
-	UseProviderNetworkSetup() bool
+	UseProviderNetworkSetup(mc *MachineConfig) bool
+	SetExclusiveActive(exclusive bool)
 	RequireExclusiveActive() bool
 	UpdateSSHPort(mc *MachineConfig, port int) error
 	GetRosetta(mc *MachineConfig) (bool, error)

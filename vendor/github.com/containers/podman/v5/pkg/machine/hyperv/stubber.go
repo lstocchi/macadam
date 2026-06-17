@@ -6,38 +6,53 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
 
 	"github.com/Microsoft/go-winio"
-	"github.com/containers/common/pkg/strongunits"
 	gvproxy "github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/containers/libhvee/pkg/hypervctl"
+	"github.com/containers/podman/v5/pkg/errorhandling"
 	"github.com/containers/podman/v5/pkg/machine"
+	"github.com/containers/podman/v5/pkg/machine/cloudinit"
 	"github.com/containers/podman/v5/pkg/machine/define"
 	"github.com/containers/podman/v5/pkg/machine/env"
+	"github.com/containers/podman/v5/pkg/machine/hyperv/hutil"
 	"github.com/containers/podman/v5/pkg/machine/hyperv/vsock"
 	"github.com/containers/podman/v5/pkg/machine/ignition"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
-	"github.com/containers/podman/v5/pkg/systemd/parser"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/strongunits"
 )
 
 type HyperVStubber struct {
 	vmconfigs.HyperVConfig
 }
 
+var (
+	exclusiveActive = true
+)
+
 func (h HyperVStubber) UserModeNetworkEnabled(mc *vmconfigs.MachineConfig) bool {
-	return true
+	return mc.HyperVHypervisor.UserModeNetworking
 }
 
-func (h HyperVStubber) UseProviderNetworkSetup() bool {
-	return false
+func (h HyperVStubber) UseProviderNetworkSetup(mc *vmconfigs.MachineConfig) bool {
+	return mc.HyperVHypervisor.UserModeNetworking == false
+}
+
+func (h HyperVStubber) SetExclusiveActive(exclusive bool) {
+	exclusiveActive = exclusive
 }
 
 func (h HyperVStubber) RequireExclusiveActive() bool {
-	return true
+	return exclusiveActive
 }
 
 func (h HyperVStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.MachineConfig, builder *ignition.IgnitionBuilder) error {
@@ -55,12 +70,28 @@ func (h HyperVStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.MachineC
 		Memory:   uint64(mc.Resources.Memory),
 	}
 
-	networkHVSock, err := vsock.NewHVSockRegistryEntry(mc.Name, vsock.Network)
-	if err != nil {
-		return err
+	// HyperVHypervisor is initialized when preparing to use ignition, however hyperv also works with cloud-init
+	// so we need to ensure that HyperVHypervisor is initialized here as well.
+	if mc.HyperVHypervisor == nil {
+		mc.HyperVHypervisor = new(vmconfigs.HyperVConfig)
 	}
 
-	mc.HyperVHypervisor.NetworkVSock = *networkHVSock
+	// Set userModeNetworking based on cloudInit value for backwards compatibility
+	// Usermode networking is true by default when working with ignition
+	// If cloud-init is enabled, use userModeNetworking from options
+	mc.HyperVHypervisor.UserModeNetworking = !mc.CloudInit || opts.UserModeNetworking
+
+	if mc.HyperVHypervisor.UserModeNetworking {
+		networkHVSock, err := vsock.NewHVSockRegistryEntry(mc.Name, vsock.Network)
+		if err != nil {
+			return err
+		}
+
+		mc.HyperVHypervisor.NetworkVSock = *networkHVSock
+	} else {
+		mc.SSH.Port = 22
+		hwConfig.Network = true
+	}
 
 	// Add vsock port numbers to mounts
 	err = createShares(mc)
@@ -79,29 +110,42 @@ func (h HyperVStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.MachineC
 	}
 	callbackFuncs.Add(removeRegistrySockets)
 
-	netUnitFile, err := createNetworkUnit(mc.HyperVHypervisor.NetworkVSock.Port)
-	if err != nil {
-		return err
+	// GenerateISO MUST be executed after creating shares to ensure we know the vsock ports
+	// to generate the 9p-vsock@.service unit files for the cloud-init user data file
+	if mc.CloudInit {
+		// Generate cloud-init ISO
+		iso, err := cloudinit.GenerateISO(mc)
+		if err != nil {
+			return fmt.Errorf("generating cloud-init ISO: %w", err)
+		}
+		hwConfig.DVDDiskPath = iso.GetPath()
 	}
 
-	builder.WithUnit(ignition.Unit{
-		Contents: ignition.StrToPtr(netUnitFile),
-		Enabled:  ignition.BoolToPtr(true),
-		Name:     "vsock-network.service",
-	})
+	if builder != nil {
+		netUnitFile, err := hutil.CreateNetworkUnit(mc.HyperVHypervisor.NetworkVSock.Port)
+		if err != nil {
+			return err
+		}
 
-	builder.WithFile(ignition.File{
-		Node: ignition.Node{
-			Path: "/etc/NetworkManager/system-connections/vsock0.nmconnection",
-		},
-		FileEmbedded1: ignition.FileEmbedded1{
-			Append: nil,
-			Contents: ignition.Resource{
-				Source: ignition.EncodeDataURLPtr(hyperVVsockNMConnection),
+		builder.WithUnit(ignition.Unit{
+			Contents: ignition.StrToPtr(netUnitFile),
+			Enabled:  ignition.BoolToPtr(true),
+			Name:     "vsock-network.service",
+		})
+
+		builder.WithFile(ignition.File{
+			Node: ignition.Node{
+				Path: "/etc/NetworkManager/system-connections/vsock0.nmconnection",
 			},
-			Mode: ignition.IntToPtr(0600),
-		},
-	})
+			FileEmbedded1: ignition.FileEmbedded1{
+				Append: nil,
+				Contents: ignition.Resource{
+					Source: ignition.EncodeDataURLPtr(hutil.HyperVVsockNMConnection),
+				},
+				Mode: ignition.IntToPtr(0o600),
+			},
+		})
+	}
 
 	vmm := hypervctl.NewVirtualMachineManager()
 	err = vmm.NewVirtualMachine(mc.Name, &hwConfig)
@@ -122,17 +166,17 @@ func (h HyperVStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.MachineC
 	return err
 }
 
-func (h HyperVStubber) Exists(name string) (bool, error) {
+func (h HyperVStubber) Exists(name string) (*bool, error) {
 	vmm := hypervctl.NewVirtualMachineManager()
 	exists, _, err := vmm.GetMachineExists(name)
-	return exists, err
+	return &exists, err
 }
 
 func (h HyperVStubber) MountType() vmconfigs.VolumeMountType {
 	return vmconfigs.NineP
 }
 
-func (h HyperVStubber) MountVolumesToVM(mc *vmconfigs.MachineConfig, quiet bool) error {
+func (h HyperVStubber) MountVolumesToVM(_ *vmconfigs.MachineConfig, _ bool) error {
 	return nil
 }
 
@@ -142,21 +186,43 @@ func (h HyperVStubber) Remove(mc *vmconfigs.MachineConfig) ([]string, func() err
 		return nil, nil, err
 	}
 
+	rmFiles := []string{}
+
+	cloudinitISO, err := cloudinit.GetCloudInitISOVMFile(mc)
+	if err == nil {
+		rmFiles = append(rmFiles, cloudinitISO.GetPath())
+	}
+
 	rmFunc := func() error {
+		var errs []error
+
 		// Tear down vsocks
 		removeNetworkAndReadySocketsFromRegistry(mc)
 
 		// Remove ignition registry entries - not a fatal error
 		// for vm removal
 		// TODO we could improve this by recommending an action be done
-		if err := removeIgnitionFromRegistry(vm); err != nil {
-			logrus.Errorf("unable to remove ignition registry entries: %q", err)
+		if !mc.CloudInit {
+			if err := removeIgnitionFromRegistry(vm); err != nil {
+				errs = append(errs, fmt.Errorf("unable to remove ignition registry entries: %q", err))
+			}
+		}
+
+		if cloudinitISO != nil {
+			if err := cloudinitISO.Delete(); err != nil {
+				errs = append(errs, err)
+			}
 		}
 
 		// disk path removal is done by generic remove
-		return vm.Remove("")
+		err := vm.Remove("")
+		if err != nil {
+			errs = append(errs, err)
+		}
+
+		return errorhandling.JoinErrors(errs)
 	}
-	return []string{}, rmFunc, nil
+	return rmFiles, rmFunc, nil
 }
 
 func (h HyperVStubber) RemoveAndCleanMachines(_ *define.MachineDirs) error {
@@ -164,7 +230,10 @@ func (h HyperVStubber) RemoveAndCleanMachines(_ *define.MachineDirs) error {
 }
 
 func (h HyperVStubber) StartNetworking(mc *vmconfigs.MachineConfig, cmd *gvproxy.GvproxyCommand) error {
-	cmd.AddEndpoint(fmt.Sprintf("vsock://%s", mc.HyperVHypervisor.NetworkVSock.KeyName))
+	if mc.HyperVHypervisor.UserModeNetworking {
+		cmd.AddEndpoint(fmt.Sprintf("vsock://%s", mc.HyperVHypervisor.NetworkVSock.KeyName))
+		return nil
+	}
 	return nil
 }
 
@@ -182,12 +251,7 @@ func (h HyperVStubber) StartVM(mc *vmconfigs.MachineConfig) (func() error, func(
 	defer callbackFuncs.CleanIfErr(&err)
 	go callbackFuncs.CleanOnSignal()
 
-	firstBoot, err := mc.IsFirstBoot()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if firstBoot {
+	if mc.IsFirstBoot() && !mc.CloudInit {
 		// Add ignition entries to windows registry
 		// for first boot only
 		if err := readAndSplitIgnition(mc, vm); err != nil {
@@ -211,15 +275,21 @@ func (h HyperVStubber) StartVM(mc *vmconfigs.MachineConfig) (func() error, func(
 		callbackFuncs.Add(rmIgnCallbackFunc)
 	}
 
-	waitReady, listener, err := mc.HyperVHypervisor.ReadyVsock.ListenSetupWait()
-	if err != nil {
-		return nil, nil, err
+	var waitReady func() error
+	var listener io.Closer
+	if mc.HyperVHypervisor.ReadyVsock.KeyName != "" {
+		waitReady, listener, err = mc.HyperVHypervisor.ReadyVsock.ListenSetupWait()
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	err = vm.Start()
 	if err != nil {
 		// cleanup the pending listener
-		_ = listener.Close()
+		if listener != nil {
+			_ = listener.Close()
+		}
 		return nil, nil, err
 	}
 
@@ -228,13 +298,22 @@ func (h HyperVStubber) StartVM(mc *vmconfigs.MachineConfig) (func() error, func(
 	}
 	callbackFuncs.Add(startCallback)
 
+	// If we are not using user mode networking, we need to retrieve the VM IP address
+	if !mc.HyperVHypervisor.UserModeNetworking {
+		ip, err := getVMIPAddress(mc.Name)
+		if err != nil {
+			return nil, nil, fmt.Errorf("retrieving VM's IP: %w", err)
+		}
+		mc.IPAddress = ip
+	}
+
 	return nil, waitReady, err
 }
 
 // State is returns the state as a define.status.  for hyperv, state differs from others because
 // state is determined by the VM itself.  normally this can be done with vm.State() and a conversion
 // but doing here as well.  this requires a little more interaction with the hypervisor
-func (h HyperVStubber) State(mc *vmconfigs.MachineConfig, bypass bool) (define.Status, error) {
+func (h HyperVStubber) State(mc *vmconfigs.MachineConfig, _ bool) (define.Status, error) {
 	_, vm, err := GetVMFromMC(mc)
 	if err != nil {
 		return define.Unknown, err
@@ -257,9 +336,26 @@ func (h HyperVStubber) StopVM(mc *vmconfigs.MachineConfig, hardStop bool) error 
 	}
 
 	if hardStop {
-		return vm.StopWithForce()
+		err = vm.StopWithForce()
+	} else {
+		err = vm.Stop()
 	}
-	return vm.Stop()
+	if err != nil {
+		return err
+	}
+
+	// Stop the 9p server if it's running
+	// If we do not succeed do not return an error so to not block the VM stop
+	dirs, err := env.GetMachineDirs(h.VMType())
+	if err != nil {
+		logrus.Warnf("Failed to get machine dirs for server9p cleanup: %v", err)
+		return nil
+	}
+	err = machine.StopServer9p(mc, dirs)
+	if err != nil {
+		logrus.Warnf("Failed to stop server9p (VM is stopped): %v", err)
+	}
+	return nil
 }
 
 // TODO should this be plumbed higher into the code stack?
@@ -353,7 +449,7 @@ func (h HyperVStubber) SetProviderAttrs(mc *vmconfigs.MachineConfig, opts define
 	return nil
 }
 
-func (h HyperVStubber) PrepareIgnition(mc *vmconfigs.MachineConfig, ignBuilder *ignition.IgnitionBuilder) (*ignition.ReadyUnitOpts, error) {
+func (h HyperVStubber) PrepareIgnition(mc *vmconfigs.MachineConfig, _ *ignition.IgnitionBuilder) (*ignition.ReadyUnitOpts, error) {
 	// HyperV is different because it has to know some ignition details before creating the VM.  It cannot
 	// simply be derived. So we create the HyperVConfig here.
 	mc.HyperVHypervisor = new(vmconfigs.HyperVConfig)
@@ -370,7 +466,7 @@ func (h HyperVStubber) PrepareIgnition(mc *vmconfigs.MachineConfig, ignBuilder *
 	return &ignOpts, nil
 }
 
-func (h HyperVStubber) PostStartNetworking(mc *vmconfigs.MachineConfig, noInfo bool) error {
+func (h HyperVStubber) PostStartNetworking(mc *vmconfigs.MachineConfig, _ bool) error {
 	var (
 		err        error
 		executable string
@@ -391,14 +487,19 @@ func (h HyperVStubber) PostStartNetworking(mc *vmconfigs.MachineConfig, noInfo b
 	if err != nil {
 		return err
 	}
-	// GvProxy PID file path is now derived
-	gvproxyPIDFile, err := dirs.RuntimeDir.AppendToNewVMFile("gvproxy.pid", nil)
-	if err != nil {
-		return err
-	}
-	gvproxyPID, err = gvproxyPIDFile.ReadPIDFrom()
-	if err != nil {
-		return err
+	// If user mode networking is enabled, we need to get the GvProxy PID
+	// to pass to the 9p server.
+	// If cloud-init is enabled, we do not need to pass the GvProxy PID to the 9p server.
+	if !mc.CloudInit && mc.HyperVHypervisor.UserModeNetworking {
+		// GvProxy PID file path is now derived
+		gvproxyPIDFile, err := machine.GetGVProxyPIDFile(mc, dirs)
+		if err != nil {
+			return err
+		}
+		gvproxyPID, err = gvproxyPIDFile.ReadPIDFrom()
+		if err != nil {
+			return err
+		}
 	}
 
 	executable, err = os.Executable()
@@ -418,34 +519,67 @@ func (h HyperVStubber) PostStartNetworking(mc *vmconfigs.MachineConfig, noInfo b
 		}
 		p9ServerArgs = append(p9ServerArgs, "--serve", fmt.Sprintf("%s:%s", mount.Source, winio.VsockServiceID(uint32(*mount.VSockNumber)).String()))
 	}
-	p9ServerArgs = append(p9ServerArgs, fmt.Sprintf("%d", gvproxyPID))
+	if gvproxyPID > 0 {
+		p9ServerArgs = append(p9ServerArgs, fmt.Sprintf("%d", gvproxyPID))
+	}
 
 	logrus.Debugf("Going to start 9p server using command: %s %v", executable, p9ServerArgs)
 
 	fsCmd := exec.Command(executable, p9ServerArgs...)
 
 	if logrus.IsLevelEnabled(logrus.DebugLevel) {
-		err = logCommandToFile(fsCmd, "podman-machine-server9.log")
+		log, err := logCommandToFile(fsCmd, fmt.Sprintf("machine-server9p-%s.log", mc.Name))
 		if err != nil {
 			return err
 		}
+		defer log.Close()
 	}
 
 	err = fsCmd.Start()
 	if err != nil {
 		return fmt.Errorf("unable to start 9p server: %v", err)
 	}
-	logrus.Infof("Started podman 9p server as PID %d", fsCmd.Process.Pid)
+	server9pPID := fsCmd.Process.Pid
+	logrus.Infof("Started 9p server as PID %d", server9pPID)
 
-	// Note: No callback is needed to stop the 9p server, because it will stop when
-	// gvproxy stops
+	// Register an immediate cleanup that kills by PID in case anything
+	// below fails before StopServer9p becomes usable (PID file not yet written).
+	killServer9p := func() error {
+		if p, err := os.FindProcess(server9pPID); err == nil {
+			if err := p.Kill(); err != nil {
+				logrus.Warnf("Failed to kill server9p process %d: %v", server9pPID, err)
+			}
+		}
+		return nil
+	}
+	callbackFuncs.Add(killServer9p)
+
+	// Note: To keep compatibility with upstream podman, when using ignition, no callback is needed to stop the 9p server, because it will stop when
+	// gvproxy stops. When using cloud-init, we need to store the PID file to clean up on VM stop.
+	if mc.CloudInit {
+		// Store the PID file for cleanup on stop
+		serverPIDFile, err := machine.GetServer9pPIDFile(mc, dirs)
+		if err != nil {
+			return fmt.Errorf("unable to get server9p PID file: %w", err)
+		}
+		if err := os.WriteFile(serverPIDFile.GetPath(), []byte(fmt.Sprintf("%d", server9pPID)), 0o644); err != nil {
+			return fmt.Errorf("unable to write server9p PID file: %w", err)
+		}
+		cleanupPIDFile := func() error {
+			if err := serverPIDFile.Delete(); err != nil {
+				logrus.Warnf("Failed to clean up server9p PID file: %v", err)
+			}
+			return nil
+		}
+		callbackFuncs.Add(cleanupPIDFile)
+	}
 
 	// Finalize starting shares after we are confident gvproxy is still alive.
 	err = startShares(mc)
 	return err
 }
 
-func (h HyperVStubber) UpdateSSHPort(mc *vmconfigs.MachineConfig, port int) error {
+func (h HyperVStubber) UpdateSSHPort(_ *vmconfigs.MachineConfig, _ int) error {
 	// managed by gvproxy on this backend, so nothing to do
 	return nil
 }
@@ -461,18 +595,64 @@ func resizeDisk(newSize strongunits.GiB, imagePath *define.VMFile) error {
 	return nil
 }
 
+func getVMIPAddress(name string) (string, error) {
+	backoff := 500 * time.Millisecond
+	maxBackoffs := 6
+	for i := 0; i < maxBackoffs; i++ {
+		if i > 0 {
+			time.Sleep(backoff)
+			backoff *= 2
+		}
+		ip, err := getIPAddress(name)
+		if err != nil {
+			continue
+		}
+		return ip, nil
+	}
+	return "", fmt.Errorf("unable to retrieve IP address for VM %s after %d attempts", name, maxBackoffs)
+}
+
+func getIPAddress(name string) (string, error) {
+	ipAddress := exec.Command("powershell", []string{"-command", fmt.Sprintf("Get-VM -Name %s | Select-Object -ExpandProperty NetworkAdapters | Select-Object IPAddresses", name)}...)
+	logrus.Debug(ipAddress.Args)
+	var stdout bytes.Buffer
+	ipAddress.Stdout = &stdout
+	ipAddress.Stderr = os.Stderr
+	if err := ipAddress.Run(); err != nil {
+		return "", fmt.Errorf("getting VM IP address: %q", err)
+	}
+	re := regexp.MustCompile(`\{(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}),.*?\}`)
+
+	matches := re.FindStringSubmatch(stdout.String())
+
+	if len(matches) > 1 {
+		ipv4Address := matches[1]
+		// Validate that it's a valid IPv4 address
+		if net.ParseIP(ipv4Address) == nil {
+			return "", fmt.Errorf("invalid IPv4 address extracted: %s", ipv4Address)
+		}
+		return ipv4Address, nil
+	}
+
+	return "", fmt.Errorf("could not extract IPv4 address from output: %s", strings.TrimSpace(stdout.String()))
+}
+
+func removeVsockFromRegistry(vsock vsock.HVSockRegistryEntry) {
+	if vsock.KeyName != "" {
+		if err := vsock.Remove(); err != nil {
+			logrus.Errorf("unable to remove registry entry for %s: %q", vsock.KeyName, err)
+		}
+	}
+}
+
 // removeNetworkAndReadySocketsFromRegistry removes the Network and Ready sockets
 // from the Windows Registry
 func removeNetworkAndReadySocketsFromRegistry(mc *vmconfigs.MachineConfig) {
 	// Remove the HVSOCK for networking
-	if err := mc.HyperVHypervisor.NetworkVSock.Remove(); err != nil {
-		logrus.Errorf("unable to remove registry entry for %s: %q", mc.HyperVHypervisor.NetworkVSock.KeyName, err)
-	}
+	removeVsockFromRegistry(mc.HyperVHypervisor.NetworkVSock)
 
 	// Remove the HVSOCK for events
-	if err := mc.HyperVHypervisor.ReadyVsock.Remove(); err != nil {
-		logrus.Errorf("unable to remove registry entry for %s: %q", mc.HyperVHypervisor.ReadyVsock.KeyName, err)
-	}
+	removeVsockFromRegistry(mc.HyperVHypervisor.ReadyVsock)
 }
 
 // readAndSplitIgnition reads the ignition file and splits it into key:value pairs
@@ -506,53 +686,24 @@ func removeIgnitionFromRegistry(vm *hypervctl.VirtualMachine) error {
 	return nil
 }
 
-func logCommandToFile(c *exec.Cmd, filename string) error {
+func logCommandToFile(c *exec.Cmd, filename string) (*os.File, error) {
 	dir, err := env.GetDataDir(define.HyperVVirt)
 	if err != nil {
-		return fmt.Errorf("obtain machine dir: %w", err)
+		return nil, fmt.Errorf("obtain machine dir: %w", err)
 	}
 	path := filepath.Join(dir, filename)
 	logrus.Infof("Going to log to %s", path)
 	log, err := os.Create(path)
 	if err != nil {
-		return fmt.Errorf("create log file: %w", err)
+		return nil, fmt.Errorf("create log file: %w", err)
 	}
-	defer log.Close()
 
 	c.Stdout = log
 	c.Stderr = log
 
-	return nil
+	return log, nil
 }
 
-const hyperVVsockNMConnection = `
-[connection]
-id=vsock0
-type=tun
-interface-name=vsock0
-
-[tun]
-mode=2
-
-[802-3-ethernet]
-cloned-mac-address=5A:94:EF:E4:0C:EE
-
-[ipv4]
-method=auto
-
-[proxy]
-`
-
-func createNetworkUnit(netPort uint64) (string, error) {
-	netUnit := parser.NewUnitFile()
-	netUnit.Add("Unit", "Description", "vsock_network")
-	netUnit.Add("Unit", "After", "NetworkManager.service")
-	netUnit.Add("Service", "ExecStart", fmt.Sprintf("/usr/libexec/podman/gvforwarder -preexisting -iface vsock0 -url vsock://2:%d/connect", netPort))
-	netUnit.Add("Service", "ExecStartPost", "/usr/bin/nmcli c up vsock0")
-	netUnit.Add("Install", "WantedBy", "multi-user.target")
-	return netUnit.ToString()
-}
-
-func (h HyperVStubber) GetRosetta(mc *vmconfigs.MachineConfig) (bool, error) {
+func (h HyperVStubber) GetRosetta(_ *vmconfigs.MachineConfig) (bool, error) {
 	return false, nil
 }

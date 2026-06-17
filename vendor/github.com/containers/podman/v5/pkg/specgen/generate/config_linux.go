@@ -10,11 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/containers/common/pkg/config"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/containers/podman/v5/pkg/util"
-	"github.com/containers/storage/pkg/fileutils"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/storage/pkg/fileutils"
 
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
@@ -24,9 +24,10 @@ import (
 )
 
 // DevicesFromPath computes a list of devices
-func DevicesFromPath(g *generate.Generator, devicePath string) error {
+func DevicesFromPath(g *generate.Generator, devicePath string, config *config.Config) error {
 	if isCDIDevice(devicePath) {
 		registry, err := cdi.NewCache(
+			cdi.WithSpecDirs(config.Engine.CdiSpecDirs.Get()...),
 			cdi.WithAutoRefresh(false),
 		)
 		if err != nil {
@@ -72,7 +73,7 @@ func DevicesFromPath(g *generate.Generator, devicePath string) error {
 		}
 
 		// mount the internal devices recursively
-		if err := filepath.WalkDir(resolvedDevicePath, func(dpath string, d fs.DirEntry, e error) error {
+		if err := filepath.WalkDir(resolvedDevicePath, func(dpath string, d fs.DirEntry, _ error) error {
 			if d.Type()&os.ModeDevice == os.ModeDevice {
 				found = true
 				device := fmt.Sprintf("%s:%s", dpath, filepath.Join(dest, strings.TrimPrefix(dpath, src)))
@@ -97,7 +98,7 @@ func DevicesFromPath(g *generate.Generator, devicePath string) error {
 
 func BlockAccessToKernelFilesystems(privileged, pidModeIsHost bool, mask, unmask []string, g *generate.Generator) {
 	if !privileged {
-		for _, mp := range config.DefaultMaskedPaths {
+		for _, mp := range config.DefaultMaskedPaths() {
 			// check that the path to mask is not in the list of paths to unmask
 			if shouldMask(mp, unmask) {
 				g.AddLinuxMaskedPaths(mp)
@@ -173,7 +174,7 @@ func shouldMask(mask string, unmask []string) bool {
 		if strings.ToLower(m) == "all" {
 			return false
 		}
-		for _, m1 := range strings.Split(m, ":") {
+		for m1 := range strings.SplitSeq(m, ":") {
 			match, err := filepath.Match(m1, mask)
 			if err != nil {
 				logrus.Error(err.Error())

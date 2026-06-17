@@ -6,11 +6,11 @@ import (
 	"fmt"
 
 	"github.com/containers/podman/v5/pkg/machine"
-	"github.com/containers/podman/v5/pkg/machine/provider"
 	"github.com/containers/podman/v5/pkg/machine/shim"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/crc-org/macadam/cmd/macadam/registry"
 	macadam "github.com/crc-org/macadam/pkg/machinedriver"
+	provider2 "github.com/crc-org/macadam/pkg/machinedriver/provider"
 	"github.com/spf13/cobra"
 )
 
@@ -23,7 +23,8 @@ var (
 		Args:    cobra.MaximumNArgs(1),
 		Example: `macadam start`,
 	}
-	startOpts = machine.StartOptions{}
+	startOpts = machine.StartOptions{
+	}
 )
 
 func init() {
@@ -31,6 +32,7 @@ func init() {
 		Command: startCmd,
 	})
 
+	// FIXME: these options are no-ops, a new StartOptions instance is created in pkg/machinedriver when starting the VM
 	flags := startCmd.Flags()
 	noInfoFlagName := "no-info"
 	flags.BoolVar(&startOpts.NoInfo, noInfoFlagName, false, "Suppress informational tips")
@@ -46,16 +48,18 @@ func start(_ *cobra.Command, args []string) error {
 	}
 	initOpts := macadam.DefaultInitOpts(machineName)
 	//initOpts.ImagePuller = ...
-	vmProvider, err := provider.Get()
+	vmProvider, err := provider2.GetProviderOrDefault(provider)
 	if err != nil {
-		return nil
+		return err
 	}
+	// set exclusive mode to false so to allow multiple VMs to run at the same time
+	vmProvider.SetExclusiveActive(false)
 	vmConfig, _, err := shim.VMExists(initOpts.Name, []vmconfigs.VMProvider{vmProvider})
 	if err != nil {
 		return err
 	}
 	if vmConfig == nil {
-		return fmt.Errorf("VM %s does not exist", machineName)
+		return fmt.Errorf("VM %q does not exist", machineName)
 	}
 
 	return macadam.Start(vmConfig, vmProvider)

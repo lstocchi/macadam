@@ -4,81 +4,58 @@ import (
 	"bytes"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
-	"runtime"
+	"path/filepath"
+	"strings"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/pkg/machine"
 	"github.com/containers/podman/v5/pkg/machine/define"
-	provider2 "github.com/containers/podman/v5/pkg/machine/provider"
+	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
+	"github.com/sirupsen/logrus"
 )
 
-func RunPreflights() error {
-	if err := checkGvproxyVersion(); err != nil {
+const (
+	// Token prefix for looking for helper binary under $BINDIR
+	bindirPrefix = "$BINDIR"
+)
+
+func RunPreflights(provider vmconfigs.VMProvider, userModeNetworking *bool) error {
+	if err := validateOptions(provider, userModeNetworking); err != nil {
+		return err
+	}
+
+	if err := checkGvproxyVersion(provider, userModeNetworking); err != nil {
 		return fmt.Errorf("invalid gvproxy binary: %w", err)
 	}
 
-	if err := checkVfkitVersion(); err != nil {
+	if err := checkVfkitVersion(provider); err != nil {
 		return fmt.Errorf("invalid vfkit binary: %w", err)
 	}
 
-	if err := checkSupportedProviders(); err != nil {
-		return err
+	if err := checkKrunKitAvailability(provider); err != nil {
+		return fmt.Errorf("missing krunkit binary: %w", err)
 	}
 
 	return nil
 }
 
-// macadam/podman needs a gvproxy version which supports the --services
-// argument
-func checkGvproxyVersion() error {
-	provider, err := provider2.Get()
+func validateOptions(provider vmconfigs.VMProvider, userModeNetworking *bool) error {
+	if provider.VMType() == define.WSLVirt && userModeNetworking != nil && *userModeNetworking {
+		return fmt.Errorf("user-mode networking is not supported on WSL. Please run the command without the --user-mode-networking flag")
+	}
+	return nil
+}
+
+func GetBinaryPath(binaryName string) (*define.VMFile, error) {
+	binary, err := findBinary(binaryName)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	if provider.VMType() == define.WSLVirt {
-		return nil
-	}
-	if err := checkBinaryArg(machine.ForwarderBinaryName, "-services"); err != nil {
-		return fmt.Errorf("%w, please update to gvproxy v0.8.3 or newer", err)
-	}
-	return nil
-}
-
-// macadam/podman needs a vfkit binary which supports the --cloud-init
-// argument to inject ssh keys in RHEL cloud images
-func checkVfkitVersion() error {
-	if runtime.GOOS != "darwin" {
-		return nil
-	}
-	if err := checkBinaryArg("vfkit", "--cloud-init"); err != nil {
-		return fmt.Errorf("%w, please update to vfkit v0.6.1 or newer", err)
-	}
-	return nil
-}
-
-func checkSupportedProviders() error {
-	provider, err := provider2.Get()
-	if err != nil {
-		return err
-	}
-	vmType := provider.VMType()
-	switch vmType {
-	case define.HyperVVirt, define.LibKrun:
-		return fmt.Errorf("%s VM provider is unsupported, only wsl2 on Windows, vfkit on macOS and qemu on linux are supported", vmType.String())
-	default:
-		return nil
-	}
+	return define.NewMachineFile(binary, nil)
 }
 
 func checkBinaryArg(binaryName, arg string) error {
-	cfg, err := config.Default()
-	if err != nil {
-		return err
-	}
-
-	binary, err := cfg.FindHelperBinary(binaryName, false)
+	binary, err := findBinary(binaryName)
 	if err != nil {
 		return err
 	}
@@ -93,4 +70,58 @@ func checkBinaryArg(binaryName, arg string) error {
 	}
 
 	return nil
+}
+
+// findBindir returns the directory of the current executable.
+// Based on github.com/containers/common/pkg/config/config.go#findBindir
+func findBindir() string {
+	execPath, err := os.Executable()
+	if err == nil {
+		// Resolve symbolic links to find the actual binary file path.
+		execPath, err = filepath.EvalSymlinks(execPath)
+	}
+	if err != nil {
+		// If failed to find executable (unlikely to happen), warn about it.
+		logrus.Warnf("Failed to find $BINDIR: %v", err)
+		return ""
+	}
+	return filepath.Dir(execPath)
+}
+
+// findBinary searches for a binary in the configured directories.
+// Based on github.com/containers/common/pkg/config/config.go#FindHelperBinary
+func findBinary(name string) (string, error) {
+	dirList := getBinariesDirs()
+	// If set, search this directory first. This is used in testing.
+	if dir, found := os.LookupEnv("CONTAINERS_HELPER_BINARY_DIR"); found {
+		dirList = append([]string{dir}, dirList...)
+	}
+
+	for _, path := range dirList {
+		if path == bindirPrefix || strings.HasPrefix(path, bindirPrefix+string(filepath.Separator)) {
+			// Calculate the path to the executable with a $BINDIR prefix.
+			bindirPath := findBindir()
+			// If there's an error, don't stop the search for the helper binary.
+			// findBindir() will have warned once during the first failure.
+			if bindirPath == "" {
+				continue
+			}
+			// Replace the $BINDIR prefix with the path to the directory of the current binary.
+			if path == bindirPrefix {
+				path = bindirPath
+			} else {
+				path = filepath.Join(bindirPath, strings.TrimPrefix(path, bindirPrefix+string(filepath.Separator)))
+			}
+		}
+		// Absolute path will force exec.LookPath to check for binary existence instead of lookup everywhere in PATH
+		if abspath, err := filepath.Abs(filepath.Join(path, name)); err == nil {
+			// exec.LookPath from absolute path on Unix is equal to os.Stat + IsNotDir + check for executable bits in FileMode
+			// exec.LookPath from absolute path on Windows is equal to os.Stat + IsNotDir for `file.ext` or loops through extensions from PATHEXT for `file`
+			if lp, err := exec.LookPath(abspath); err == nil {
+				return lp, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("could not find %q in one of %v", name, dirList)
 }

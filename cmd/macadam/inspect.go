@@ -4,15 +4,19 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"time"
 
 	"github.com/containers/podman/v5/cmd/podman/utils"
+	"github.com/containers/podman/v5/pkg/machine"
 	"github.com/containers/podman/v5/pkg/machine/define"
 	"github.com/containers/podman/v5/pkg/machine/env"
-	providerpkg "github.com/containers/podman/v5/pkg/machine/provider"
+	"github.com/containers/podman/v5/pkg/machine/shim"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/crc-org/macadam/cmd/macadam/registry"
+	provider2 "github.com/crc-org/macadam/pkg/machinedriver/provider"
+	"github.com/crc-org/macadam/pkg/preflights"
 	"github.com/spf13/cobra"
 )
 
@@ -28,6 +32,18 @@ var (
 	}
 )
 
+type GVProxyInfo struct {
+	Binary        *define.VMFile `json:",omitempty"`
+	ServiceSocket *define.VMFile `json:",omitempty"`
+	Logs          *define.VMFile `json:",omitempty"`
+}
+
+// HostServicesInfo contains information about host-side services and processes
+// that support the VM, such as gvproxy
+type HostServicesInfo struct {
+	GVProxy *GVProxyInfo `json:",omitempty"`
+}
+
 // this is based on the struct of the same name in
 // github.com/containers/podman/v5/pkg/machine/config.go
 type InspectInfo struct {
@@ -39,6 +55,7 @@ type InspectInfo struct {
 	SSHConfig          vmconfigs.SSHConfig
 	State              define.Status
 	UserModeNetworking bool
+	Services           *HostServicesInfo `json:",omitempty"`
 }
 
 func init() {
@@ -51,11 +68,11 @@ func inspect(cmd *cobra.Command, args []string) error {
 	var (
 		errs utils.OutputErrors
 	)
-	provider, err := providerpkg.Get()
+	vmProvider, err := provider2.GetProviderOrDefault(provider)
 	if err != nil {
-		return nil
+		return err
 	}
-	dirs, err := env.GetMachineDirs(provider.VMType())
+	dirs, err := env.GetMachineDirs(vmProvider.VMType())
 	if err != nil {
 		return err
 	}
@@ -65,15 +82,37 @@ func inspect(cmd *cobra.Command, args []string) error {
 
 	vms := make([]InspectInfo, 0, len(args))
 	for _, name := range args {
-		mc, err := vmconfigs.LoadMachineByName(name, dirs)
+		mc, _, err := shim.VMExists(name, []vmconfigs.VMProvider{vmProvider})
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
+		if mc == nil {
+			errs = append(errs, fmt.Errorf("VM %q does not exist", name))
+			continue
+		}
 
-		state, err := provider.State(mc, false)
+		state, err := vmProvider.State(mc, false)
 		if err != nil {
 			return err
+		}
+
+		// Gather service information
+		// gvproxy is used when UserModeNetworkEnabled returns true
+		var servicesInfo *HostServicesInfo
+		if vmProvider.UserModeNetworkEnabled(mc) {
+			servicesInfo = &HostServicesInfo{
+				GVProxy: &GVProxyInfo{},
+			}
+			if binary, err := preflights.GetBinaryPath(machine.ForwarderBinaryName); err == nil {
+				servicesInfo.GVProxy.Binary = binary
+			}
+			if gvproxyServiceSocket, err := mc.GVProxyServiceSocket(); err == nil {
+				servicesInfo.GVProxy.ServiceSocket = gvproxyServiceSocket
+			}
+			if gvproxyLogFile, err := machine.GetGVProxyLogFile(mc, dirs); err == nil {
+				servicesInfo.GVProxy.Logs = gvproxyLogFile
+			}
 		}
 
 		ii := InspectInfo{
@@ -84,7 +123,8 @@ func inspect(cmd *cobra.Command, args []string) error {
 			Resources:          mc.Resources,
 			SSHConfig:          mc.SSH,
 			State:              state,
-			UserModeNetworking: provider.UserModeNetworkEnabled(mc),
+			UserModeNetworking: vmProvider.UserModeNetworkEnabled(mc),
+			Services:           servicesInfo,
 		}
 		if ii.LastUp.IsZero() {
 			ii.LastUp = nil
@@ -93,8 +133,12 @@ func inspect(cmd *cobra.Command, args []string) error {
 		vms = append(vms, ii)
 	}
 
-	if err := printJSON(vms); err != nil {
-		errs = append(errs, err)
+	// Only print JSON if we have at least one successful VM
+	// This prevents printing an empty [] when all machines failed
+	if len(vms) > 0 {
+		if err := printJSON(vms); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return errs.PrintErrors()
 }

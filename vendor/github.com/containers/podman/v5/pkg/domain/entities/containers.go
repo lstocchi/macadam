@@ -6,12 +6,12 @@ import (
 	"os"
 	"time"
 
-	nettypes "github.com/containers/common/libnetwork/types"
-	imageTypes "github.com/containers/image/v5/types"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/domain/entities/types"
 	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/storage/pkg/archive"
+	nettypes "go.podman.io/common/libnetwork/types"
+	imageTypes "go.podman.io/image/v5/types"
+	"go.podman.io/storage/pkg/archive"
 )
 
 // ContainerRunlabelOptions are the options to execute container-runlabel.
@@ -62,6 +62,8 @@ type WaitOptions struct {
 	Ignore bool
 	// Use the latest created container.
 	Latest bool
+	// Wait for exit of first container which matches conditions, ignore other ones.
+	ExitFirstMatch bool
 }
 
 // WaitReport is the result of waiting a container.
@@ -89,7 +91,7 @@ type PauseUnPauseOptions struct {
 
 type PauseUnpauseReport struct {
 	Err      error
-	Id       string //nolint:revive,stylecheck
+	Id       string
 	RawInput string
 }
 
@@ -103,7 +105,7 @@ type StopOptions struct {
 
 type StopReport struct {
 	Err      error
-	Id       string //nolint:revive,stylecheck
+	Id       string
 	RawInput string
 }
 
@@ -125,7 +127,7 @@ type KillOptions struct {
 
 type KillReport struct {
 	Err      error
-	Id       string //nolint:revive,stylecheck
+	Id       string
 	RawInput string
 }
 
@@ -139,7 +141,7 @@ type RestartOptions struct {
 
 type RestartReport struct {
 	Err      error
-	Id       string //nolint:revive,stylecheck
+	Id       string
 	RawInput string
 }
 
@@ -187,7 +189,7 @@ type CopyOptions struct {
 }
 
 type CommitReport struct {
-	Id string //nolint:revive,stylecheck
+	Id string
 }
 
 type ContainerExportOptions struct {
@@ -225,6 +227,7 @@ type RestoreOptions struct {
 	Latest          bool
 	Name            string
 	TCPEstablished  bool
+	TCPClose        bool
 	ImportPrevious  string
 	PublishPorts    []string
 	Pod             string
@@ -235,7 +238,7 @@ type RestoreOptions struct {
 type RestoreReport = types.RestoreReport
 
 type ContainerCreateReport struct {
-	Id string //nolint:revive,stylecheck
+	Id string
 }
 
 // AttachOptions describes the cli and other values
@@ -315,7 +318,7 @@ type ContainerStartOptions struct {
 // ContainerStartReport describes the response from starting
 // containers from the cli
 type ContainerStartReport struct {
-	Id       string //nolint:revive,stylecheck
+	Id       string
 	RawInput string
 	Err      error
 	ExitCode int
@@ -360,7 +363,7 @@ type ContainerRunOptions struct {
 // a container
 type ContainerRunReport struct {
 	ExitCode int
-	Id       string //nolint:revive,stylecheck
+	Id       string
 }
 
 // ContainerCleanupOptions are the CLI values for the
@@ -378,7 +381,7 @@ type ContainerCleanupOptions struct {
 // container cleanup
 type ContainerCleanupReport struct {
 	CleanErr error
-	Id       string //nolint:revive,stylecheck
+	Id       string
 	RawInput string
 	RmErr    error
 	RmiErr   error
@@ -395,7 +398,7 @@ type ContainerInitOptions struct {
 // container init
 type ContainerInitReport struct {
 	Err      error
-	Id       string //nolint:revive,stylecheck
+	Id       string
 	RawInput string
 }
 
@@ -418,7 +421,7 @@ type ContainerUnmountOptions struct {
 // ContainerMountReport describes the response from container mount
 type ContainerMountReport struct {
 	Err  error
-	Id   string //nolint:revive,stylecheck
+	Id   string
 	Name string
 	Path string
 }
@@ -426,7 +429,7 @@ type ContainerMountReport struct {
 // ContainerUnmountReport describes the response from umounting a container
 type ContainerUnmountReport struct {
 	Err error
-	Id  string //nolint:revive,stylecheck
+	Id  string
 }
 
 // ContainerPruneOptions describes the options needed
@@ -445,7 +448,7 @@ type ContainerPortOptions struct {
 // ContainerPortReport describes the output needed for
 // the CLI to output ports
 type ContainerPortReport struct {
-	Id    string //nolint:revive,stylecheck
+	Id    string
 	Ports []nettypes.PortMapping
 }
 

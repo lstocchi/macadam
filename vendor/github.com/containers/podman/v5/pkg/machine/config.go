@@ -12,19 +12,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containers/common/pkg/strongunits"
 	"github.com/containers/podman/v5/pkg/machine/compression"
 	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/env"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/strongunits"
 )
 
 const apiUpTimeout = 20 * time.Second
 
-var (
-	ForwarderBinaryName = "gvproxy"
-)
+var ForwarderBinaryName = "gvproxy"
 
 type Download struct {
 	Arch                  string
@@ -55,6 +52,7 @@ type ListResponse struct {
 	VMType             string
 	CPUs               uint64
 	Memory             strongunits.MiB
+	Swap               strongunits.MiB
 	DiskSize           strongunits.GiB
 	Port               int
 	RemoteUsername     string
@@ -68,9 +66,10 @@ type SSHOptions struct {
 }
 
 type StartOptions struct {
-	NoInfo  bool
-	Quiet   bool
-	Rosetta bool
+	NoInfo      bool
+	Quiet       bool
+	Rosetta     bool
+	MaxBackoffs int
 }
 
 type StopOptions struct{}
@@ -106,6 +105,11 @@ type InspectInfo struct {
 	Rosetta            bool
 }
 
+type InternalInspectInfo struct {
+	InspectInfo
+	Mounts []*vmconfigs.Mount
+}
+
 // ImageConfig describes the bootable image for the VM
 type ImageConfig struct {
 	// IgnitionFile is the path to the filesystem where the
@@ -134,61 +138,6 @@ const (
 	MachineLocal
 	DockerGlobal
 )
-
-// TODO THis should be able to be removed once WSL is refactored for podman5
-type Virtualization struct {
-	artifact    define.Artifact
-	compression compression.ImageCompression
-	format      define.ImageFormat
-	vmKind      define.VMType
-}
-
-func (p *Virtualization) Artifact() define.Artifact {
-	return p.artifact
-}
-
-func (p *Virtualization) Compression() compression.ImageCompression {
-	return p.compression
-}
-
-func (p *Virtualization) Format() define.ImageFormat {
-	return p.format
-}
-
-func (p *Virtualization) VMType() define.VMType {
-	return p.vmKind
-}
-
-func (p *Virtualization) NewDownload(vmName string) (Download, error) {
-	cacheDir, err := env.GetCacheDir(p.VMType())
-	if err != nil {
-		return Download{}, err
-	}
-
-	dataDir, err := env.GetDataDir(p.VMType())
-	if err != nil {
-		return Download{}, err
-	}
-
-	return Download{
-		Artifact:        p.Artifact(),
-		CacheDir:        cacheDir,
-		CompressionType: p.Compression(),
-		DataDir:         dataDir,
-		Format:          p.Format(),
-		VMKind:          p.VMType(),
-		VMName:          vmName,
-	}, nil
-}
-
-func NewVirtualization(artifact define.Artifact, compression compression.ImageCompression, format define.ImageFormat, vmKind define.VMType) Virtualization {
-	return Virtualization{
-		artifact,
-		compression,
-		format,
-		vmKind,
-	}
-}
 
 func dialSocket(socket string, timeout time.Duration) (net.Conn, error) {
 	scheme := "unix"

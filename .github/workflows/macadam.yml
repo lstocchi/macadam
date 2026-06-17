@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Check out repository code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: >-
@@ -29,18 +29,30 @@ jobs:
           git fetch --tags --force
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ matrix.go }}
 
       - name: Build
         run: make cross
-      - name: Upload macadam artifact
+      - name: Upload macadam artifact (windows)
         if: matrix.go == 'stable'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: macadam binaries
-          path: "./bin/*"
+          name: macadam windows binaries
+          path: "./bin/*windows*"
+      - name: Upload macadam artifact (linux)
+        if: matrix.go == 'stable'
+        uses: actions/upload-artifact@v7
+        with:
+          name: macadam linux binaries
+          path: "./bin/*linux*"
+      - name: Upload macadam artifact (macos)
+        if: matrix.go == 'stable'
+        uses: actions/upload-artifact@v7
+        with:
+          name: macadam macos binaries
+          path: "./bin/*darwin*"
 
 
   test:
@@ -49,32 +61,89 @@ jobs:
       matrix:
         os:
         - ubuntu-22.04
-        - macos-13
+        - macos-14
         - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: 'oldstable'
       - name: Test
         run: make test
 
+  e2e:
+    needs: build
+    strategy:
+      matrix:
+        os:
+        - ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Download binary artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: macadam linux binaries
+          path: ./bin
+      - name: Setup qemu (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt update
+          sudo apt install -y qemu-kvm
+          sudo chmod 666 /dev/kvm
+      - name: Download gvproxy
+        if: runner.os == 'Linux'
+        run: |
+          wget https://github.com/containers/gvisor-tap-vsock/releases/download/v0.8.6/gvproxy-linux-amd64 -O ${{ github.workspace }}/tools/gvproxy
+          chmod +x ${{ github.workspace }}/tools/gvproxy
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'oldstable'
+      - name: Grant execute permissions
+        if: runner.os == 'Linux'
+        run: chmod +x ./bin/*
+      - name: Test
+        env:
+          CONTAINERS_HELPER_BINARY_DIR: ${{ github.workspace }}/tools
+        run: make e2e
+      - name: Tailscale Connection (On Failure)
+        if: failure()
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TAILSCALE_CLIENTID }}
+          oauth-secret: ${{ secrets.TAILSCALE_SECRET }}
+          tags: tag:actions
+
+      - name: Keep Alive for SSH Debugging
+        if: failure()
+        run: |
+          echo "============================================="
+          echo "E2E failed! Connecting to Tailscale Mesh Network..."
+          echo "Runner Tailscale IPv4 Address:"
+          tailscale ip -4
+          echo "Connect via: ssh runner@$(tailscale ip -4)"
+          echo "============================================="
+          sleep 7200
 
   lint:
     needs: build
     runs-on: ubuntu-22.04
     steps:
       - name: Check out repository code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: 'oldstable'
       - name: Run 'make check'

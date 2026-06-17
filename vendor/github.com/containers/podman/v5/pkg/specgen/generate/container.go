@@ -7,13 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/pkg/config"
 	"github.com/containers/podman/v5/libpod"
 	"github.com/containers/podman/v5/libpod/define"
 	ann "github.com/containers/podman/v5/pkg/annotations"
@@ -22,6 +21,9 @@ import (
 	"github.com/containers/podman/v5/pkg/specgen"
 	"github.com/openshift/imagebuilder"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/image/v5/manifest"
 )
 
 func getImageFromSpec(ctx context.Context, r *libpod.Runtime, s *specgen.SpecGenerator) (*libimage.Image, string, *libimage.ImageData, error) {
@@ -61,6 +63,66 @@ func getImageFromSpec(ctx context.Context, r *libpod.Runtime, s *specgen.SpecGen
 	return image, resolvedName, inspectData, err
 }
 
+func applyHealthCheckOverrides(s *specgen.SpecGenerator, healthCheckFromImage *manifest.Schema2HealthConfig) error {
+	overrideHealthCheckConfig := s.HealthConfig
+	s.HealthConfig = healthCheckFromImage
+
+	if s.HealthConfig == nil {
+		return nil
+	}
+
+	if overrideHealthCheckConfig != nil {
+		if overrideHealthCheckConfig.Interval != 0 {
+			s.HealthConfig.Interval = overrideHealthCheckConfig.Interval
+		}
+		if overrideHealthCheckConfig.Retries != 0 {
+			s.HealthConfig.Retries = overrideHealthCheckConfig.Retries
+		}
+		if overrideHealthCheckConfig.Timeout != 0 {
+			s.HealthConfig.Timeout = overrideHealthCheckConfig.Timeout
+		}
+		if overrideHealthCheckConfig.StartPeriod != 0 {
+			s.HealthConfig.StartPeriod = overrideHealthCheckConfig.StartPeriod
+		}
+	}
+
+	disableInterval := false
+	if s.HealthConfig.Interval < 0 {
+		s.HealthConfig.Interval = 0
+		disableInterval = true
+	}
+
+	// NOTE: Zero means inherit.
+	if s.HealthConfig.Timeout == 0 {
+		hct, err := time.ParseDuration(define.DefaultHealthCheckTimeout)
+		if err != nil {
+			return err
+		}
+		s.HealthConfig.Timeout = hct
+	}
+	if s.HealthConfig.Interval == 0 && !disableInterval {
+		hct, err := time.ParseDuration(define.DefaultHealthCheckInterval)
+		if err != nil {
+			return err
+		}
+		s.HealthConfig.Interval = hct
+	}
+
+	if s.HealthConfig.Retries == 0 {
+		s.HealthConfig.Retries = int(define.DefaultHealthCheckRetries)
+	}
+
+	if s.HealthConfig.StartPeriod == 0 {
+		hct, err := time.ParseDuration(define.DefaultHealthCheckStartPeriod)
+		if err != nil {
+			return err
+		}
+		s.HealthConfig.StartPeriod = hct
+	}
+
+	return nil
+}
+
 // Fill any missing parts of the spec generator (e.g. from the image).
 // Returns a set of warnings or any fatal error that occurred.
 func CompleteSpec(ctx context.Context, r *libpod.Runtime, s *specgen.SpecGenerator) ([]string, error) {
@@ -70,25 +132,9 @@ func CompleteSpec(ctx context.Context, r *libpod.Runtime, s *specgen.SpecGenerat
 		return nil, err
 	}
 	if inspectData != nil {
-		if s.HealthConfig == nil {
-			// NOTE: the health check is only set for Docker images
-			// but inspect will take care of it.
-			s.HealthConfig = inspectData.HealthCheck
-			if s.HealthConfig != nil {
-				if s.HealthConfig.Timeout == 0 {
-					hct, err := time.ParseDuration(define.DefaultHealthCheckTimeout)
-					if err != nil {
-						return nil, err
-					}
-					s.HealthConfig.Timeout = hct
-				}
-				if s.HealthConfig.Interval == 0 {
-					hct, err := time.ParseDuration(define.DefaultHealthCheckInterval)
-					if err != nil {
-						return nil, err
-					}
-					s.HealthConfig.Interval = hct
-				}
+		if s.HealthConfig == nil || len(s.HealthConfig.Test) == 0 {
+			if err := applyHealthCheckOverrides(s, inspectData.HealthCheck); err != nil {
+				return nil, err
 			}
 		}
 
@@ -249,9 +295,7 @@ func CompleteSpec(ctx context.Context, r *libpod.Runtime, s *specgen.SpecGenerat
 		annotations[k] = v
 	}
 	// now pass in the values from client
-	for k, v := range s.Annotations {
-		annotations[k] = v
-	}
+	maps.Copy(annotations, s.Annotations)
 	s.Annotations = annotations
 
 	if len(s.SeccompProfilePath) < 1 {
@@ -293,7 +337,9 @@ func CompleteSpec(ctx context.Context, r *libpod.Runtime, s *specgen.SpecGenerat
 				s.LogConfiguration.Options = make(map[string]string)
 			}
 
-			s.LogConfiguration.Options["tag"] = rtc.Containers.LogTag
+			if _, exists := s.LogConfiguration.Options["tag"]; !exists {
+				s.LogConfiguration.Options["tag"] = rtc.Containers.LogTag
+			}
 		} else {
 			logrus.Warnf("log_tag %q is not allowed with %q log_driver", rtc.Containers.LogTag, define.JSONLogging)
 		}
@@ -304,11 +350,13 @@ func CompleteSpec(ctx context.Context, r *libpod.Runtime, s *specgen.SpecGenerat
 		return warnings, err
 	}
 
-	// Warn on net=host/container/pod/none and port mappings.
-	if (s.NetNS.NSMode == specgen.Host || s.NetNS.NSMode == specgen.FromContainer ||
-		s.NetNS.NSMode == specgen.FromPod || s.NetNS.NSMode == specgen.NoNetwork) &&
-		len(s.PortMappings) > 0 {
-		warnings = append(warnings, "Port mappings have been discarded as one of the Host, Container, Pod, and None network modes are in use")
+	// Warn if NetNS mode is not compatible with PorMappings
+	if len(s.PortMappings) > 0 {
+		nsMode := s.NetNS.NSMode
+		if nsMode != "" && !isPortMappingCompatibleNetNSMode(nsMode) {
+			warnings = append(warnings,
+				fmt.Sprintf("Port mappings have been discarded because \"%s\" network namespace mode does not support them", nsMode))
+		}
 	}
 
 	if len(s.ImageVolumeMode) == 0 {
@@ -462,6 +510,10 @@ func ConfigToSpec(rt *libpod.Runtime, specg *specgen.SpecGenerator, containerID 
 		specg.HealthMaxLogSize = define.DefaultHealthMaxLogSize
 	}
 
+	specg.HealthConfig = conf.HealthCheckConfig
+	specg.StartupHealthConfig = conf.StartupHealthCheckConfig
+	specg.HealthCheckOnFailureAction = conf.HealthCheckOnFailureAction
+
 	specg.IDMappings = &conf.IDMappings
 	specg.ContainerCreateCommand = conf.CreateCommand
 	if len(specg.Rootfs) == 0 {
@@ -572,4 +624,16 @@ func CheckName(rt *libpod.Runtime, n string, kind bool) string {
 		n += "-clone"
 	}
 	return n
+}
+
+// isPortMappingCompatibleNetNSMode validates if mode of the provided
+// Namespace mode is compatible with port mappings.
+// Note: Update `podman run --publish | -p` docs when modifying this function.
+func isPortMappingCompatibleNetNSMode(nsMode specgen.NamespaceMode) bool {
+	switch nsMode {
+	case specgen.Bridge, specgen.Slirp, specgen.Pasta:
+		return true
+	default:
+		return false
+	}
 }

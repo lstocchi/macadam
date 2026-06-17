@@ -3,16 +3,14 @@
 package provider
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 
-	"github.com/containers/common/pkg/config"
 	"github.com/containers/podman/v5/pkg/machine/define"
 	"github.com/containers/podman/v5/pkg/machine/qemu"
 	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/config"
 )
 
 func Get() (vmconfigs.VMProvider, error) {
@@ -50,19 +48,9 @@ func SupportedProviders() []define.VMType {
 func IsInstalled(provider define.VMType) (bool, error) {
 	switch provider {
 	case define.QemuVirt:
-		cfg, err := config.Default()
+		_, err := qemu.FindQEMUBinary()
 		if err != nil {
-			return false, err
-		}
-		if cfg == nil {
-			return false, fmt.Errorf("error fetching getting default config")
-		}
-		_, err = cfg.FindHelperBinary(qemu.QemuCommand, true)
-		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
-		}
-		if err != nil {
-			return false, err
 		}
 		return true, nil
 	default:

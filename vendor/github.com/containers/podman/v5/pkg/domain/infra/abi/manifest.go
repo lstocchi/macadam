@@ -12,22 +12,23 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/libimage/define"
-	cp "github.com/containers/image/v5/copy"
-	"github.com/containers/image/v5/docker"
-	"github.com/containers/image/v5/manifest"
-	"github.com/containers/image/v5/pkg/compression"
-	"github.com/containers/image/v5/pkg/shortnames"
-	"github.com/containers/image/v5/transports"
-	"github.com/containers/image/v5/transports/alltransports"
-	"github.com/containers/image/v5/types"
 	"github.com/containers/podman/v5/pkg/domain/entities"
 	envLib "github.com/containers/podman/v5/pkg/env"
-	"github.com/containers/storage"
 	"github.com/opencontainers/go-digest"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/libimage/define"
+	cp "go.podman.io/image/v5/copy"
+	"go.podman.io/image/v5/docker"
+	"go.podman.io/image/v5/image"
+	"go.podman.io/image/v5/manifest"
+	"go.podman.io/image/v5/pkg/compression"
+	"go.podman.io/image/v5/pkg/shortnames"
+	"go.podman.io/image/v5/transports"
+	"go.podman.io/image/v5/transports/alltransports"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/storage"
 )
 
 // ManifestCreate implements logic for creating manifest lists via ImageEngine
@@ -69,7 +70,7 @@ func (ir *ImageEngine) ManifestCreate(ctx context.Context, name string, images [
 }
 
 // ManifestExists checks if a manifest list with the given name exists in local storage
-func (ir *ImageEngine) ManifestExists(ctx context.Context, name string) (*entities.BoolReport, error) {
+func (ir *ImageEngine) ManifestExists(_ context.Context, name string) (*entities.BoolReport, error) {
 	_, err := ir.Libpod.LibimageRuntime().LookupManifestList(name)
 	if err != nil {
 		if errors.Is(err, storage.ErrImageUnknown) {
@@ -148,7 +149,7 @@ func (ir *ImageEngine) remoteManifestInspect(ctx context.Context, name string, o
 		}
 		defer src.Close()
 
-		manifestBytes, manifestType, err := src.GetManifest(ctx, nil)
+		manifestBytes, manifestType, err := image.UnparsedInstance(src, nil).Manifest(ctx)
 		if err != nil {
 			appendErr(fmt.Errorf("loading manifest %q: %w", transports.ImageName(ref), err))
 			continue
@@ -429,7 +430,7 @@ func (ir *ImageEngine) digestFromDigestOrManifestListMember(ctx context.Context,
 		return "", fmt.Errorf("reading local image %q to check if it's in the manifest list: %w", name, err)
 	}
 	defer src.Close()
-	manifestBytes, _, err := src.GetManifest(ctx, nil)
+	manifestBytes, _, err := image.UnparsedInstance(src, nil).Manifest(ctx)
 	if err != nil {
 		return "", fmt.Errorf("locating image named %q to check if it's in the manifest list: %w", name, err)
 	}
@@ -441,7 +442,7 @@ func (ir *ImageEngine) digestFromDigestOrManifestListMember(ctx context.Context,
 }
 
 // ManifestRemoveDigest removes specified digest from the specified manifest list
-func (ir *ImageEngine) ManifestRemoveDigest(ctx context.Context, name, image string) (string, error) {
+func (ir *ImageEngine) ManifestRemoveDigest(_ context.Context, name, image string) (string, error) {
 	instanceDigest, err := digest.Parse(image)
 	if err != nil {
 		return "", fmt.Errorf(`invalid image digest "%s": %v`, image, err)
@@ -548,7 +549,7 @@ func (ir *ImageEngine) ManifestPush(ctx context.Context, name, destination strin
 }
 
 // ManifestListClear clears out all instances from the manifest list
-func (ir *ImageEngine) ManifestListClear(ctx context.Context, name string) (string, error) {
+func (ir *ImageEngine) ManifestListClear(_ context.Context, name string) (string, error) {
 	manifestList, err := ir.Libpod.LibimageRuntime().LookupManifestList(name)
 	if err != nil {
 		return "", err

@@ -9,13 +9,11 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
-	"path/filepath"
 
 	"github.com/containers/buildah/pkg/jail"
-	"github.com/containers/common/libnetwork/types"
 	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/storage/pkg/lockfile"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libnetwork/types"
 )
 
 type Netstat struct {
@@ -46,39 +44,7 @@ type NetstatAddress struct {
 	Collisions uint64 `json:"collisions"`
 }
 
-type RootlessNetNS struct {
-	dir  string
-	Lock *lockfile.LockFile
-}
-
-// getPath will join the given path to the rootless netns dir
-func (r *RootlessNetNS) getPath(path string) string {
-	return filepath.Join(r.dir, path)
-}
-
-// Do - run the given function in the rootless netns.
-// It does not lock the rootlessCNI lock, the caller
-// should only lock when needed, e.g. for network operations.
-func (r *RootlessNetNS) Do(toRun func() error) error {
-	return errors.New("not supported on freebsd")
-}
-
-// Cleanup the rootless network namespace if needed.
-// It checks if we have running containers with the bridge network mode.
-// Cleanup() expects that r.Lock is locked
-func (r *RootlessNetNS) Cleanup(runtime *Runtime) error {
-	return errors.New("not supported on freebsd")
-}
-
-// GetRootlessNetNs returns the rootless netns object. If create is set to true
-// the rootless network namespace will be created if it does not already exist.
-// If called as root it returns always nil.
-// On success the returned RootlessCNI lock is locked and must be unlocked by the caller.
-func (r *Runtime) GetRootlessNetNs(new bool) (*RootlessNetNS, error) {
-	return nil, nil
-}
-
-func getSlirp4netnsIP(subnet *net.IPNet) (*net.IP, error) {
+func getSlirp4netnsIP(_ *net.IPNet) (*net.IP, error) {
 	return nil, errors.New("not implemented GetSlirp4netnsIP")
 }
 
@@ -145,7 +111,7 @@ func (r *Runtime) createNetNS(ctr *Container) (n string, q map[string]types.Stat
 	jconf.Set("securelevel", -1)
 	j, err := jail.Create(jconf)
 	if err != nil {
-		return "", nil, fmt.Errorf("Failed to create vnet jail %s for container %s: %w", netns, ctr.ID(), err)
+		return "", nil, fmt.Errorf("failed to create vnet jail %s for container %s: %w", netns, ctr.ID(), err)
 	}
 
 	logrus.Debugf("Created vnet jail %s for container %s", netns, ctr.ID())
@@ -157,7 +123,7 @@ func (r *Runtime) createNetNS(ctr *Container) (n string, q map[string]types.Stat
 		jconf.Set("persist", false)
 		if err := j.Set(jconf); err != nil {
 			// Log this error and return the error from configureNetNS
-			logrus.Errorf("failed to destroy vnet jail %s: %w", netns, err)
+			logrus.Errorf("failed to destroy vnet jail %s: %v", netns, err)
 		}
 	}
 	return netns, networkStatus, err
@@ -255,16 +221,11 @@ func (c *Container) joinedNetworkNSPath() (string, bool) {
 	return c.state.NetNS, false
 }
 
-func (c *Container) inspectJoinedNetworkNS(networkns string) (q types.StatusBlock, retErr error) {
+func (c *Container) inspectJoinedNetworkNS(_ string) (q types.StatusBlock, retErr error) {
 	// TODO: extract interface information from the vnet jail
 	return types.StatusBlock{}, nil
-
 }
 
 func (c *Container) reloadRootlessRLKPortMapping() error {
 	return errors.New("unsupported (*Container).reloadRootlessRLKPortMapping")
-}
-
-func (c *Container) setupRootlessNetwork() error {
-	return nil
 }
