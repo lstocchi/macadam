@@ -48,6 +48,13 @@ jobs:
       checks: write # as documented in https://github.com/mikepenz/action-junit-report?tab=readme-ov-file#pr-run-permissions
 
     steps:
+    - name: Authorize Local SSH Key
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.SSH_PUBLIC_KEY }}" >> ~/.ssh/authorized_keys
+        chmod 700 ~/.ssh
+        chmod 600 ~/.ssh/authorized_keys
+        
     - name: Download qe oci image
       id: download-qe-oci-image-artifact
       uses: actions/download-artifact@v8
@@ -132,6 +139,19 @@ jobs:
           ${{ env.IMAGE_NAME_E2E }}:windows-amd64 \
               ${cmd}
         podman logs -f windows-e2e-test
+
+    - name: Tailscale Connection (On E2E Failure)
+      if: failure()
+      uses: tailscale/github-action@v3
+      with:
+        oauth-client-id: ${{ secrets.TAILSCALE_CLIENTID }}
+        oauth-secret: ${{ secrets.TAILSCALE_SECRET }}
+        tags: tag:actions
+
+    - name: Pause and Keep Alive for Diagnostics
+      if: failure()
+      run: |
+        sleep 7200
 
     - name: Test Report
       id: test-report
