@@ -12,7 +12,7 @@ require (
 	github.com/onsi/gomega v1.39.1
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/cobra v1.10.2
-	go.podman.io/common v0.67.0
+	go.podman.io/common v0.67.1
 	go.podman.io/storage v1.62.0
 )
 
@@ -23,7 +23,7 @@ require (
 	github.com/sigstore/protobuf-specs v0.5.0 // indirect
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
-	go.podman.io/image/v5 v5.39.1 // indirect
+	go.podman.io/image/v5 v5.39.2 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20251222181119-0a764e51fe1b // indirect
